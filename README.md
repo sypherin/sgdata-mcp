@@ -454,6 +454,29 @@ See [LICENSE](./LICENSE).
 
 ---
 
+## Attribution & data licence
+
+This server redistributes data from [data.gov.sg](https://data.gov.sg).
+
+> Contains information from data.gov.sg which is made available under the
+> terms of the [Singapore Open Data Licence v1.0](https://beta.data.gov.sg/open-data-licence).
+
+The MIT licence above covers the **software**; the Singapore Open Data
+Licence covers the **data** this software fetches and caches. OGL-SG v1.0
+permits free commercial use, redistribution, and derivative works —
+attribution is the only requirement, which this notice satisfies for all
+datasets sourced through the generic and curated tools in this server.
+
+A small number of datasets on data.gov.sg (notably some MAS, URA, and
+SingStat series) may carry additional source-specific terms layered on
+top of OGL-SG. If you are redistributing a specific dataset commercially
+at scale, check the originating dataset page on data.gov.sg for any
+extra conditions before relying on this blanket notice.
+
+See [NOTICE](./NOTICE) for the full attribution statement.
+
+---
+
 ## Built by
 
 Built and maintained by **[Altronis](https://altronis.sg)** — a Singapore AI
@@ -462,6 +485,6 @@ intelligence work and ship it open-source so everyone else can too.
 
 Found a bug? Want a dataset added? Open an issue on
 [GitHub](https://github.com/sypherin/sgdata-mcp) or email
-[hello@altronis.onmicrosoft.com](mailto:hello@altronis.onmicrosoft.com).
+[hello@altronis.sg](mailto:hello@altronis.sg).
 
 If you build something cool on top of this, we'd love to hear about it.

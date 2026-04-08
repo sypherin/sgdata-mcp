@@ -1,0 +1,33 @@
+sgdata-mcp
+Copyright (c) 2026 Altronis <hello@altronis.sg>
+https://altronis.sg
+
+This product (the software) is distributed under the MIT License.
+See the LICENSE file for the software licence.
+
+---
+
+This product redistributes data obtained from data.gov.sg, which is
+made available under the terms of the Singapore Open Data Licence
+version 1.0:
+
+    https://beta.data.gov.sg/open-data-licence
+
+Attribution statement (as required by OGL-SG v1.0):
+
+    Contains information from data.gov.sg which is made available
+    under the terms of the Singapore Open Data Licence version 1.0.
+
+The Singapore Open Data Licence permits free commercial use,
+redistribution, and derivative works of the data it covers, subject
+only to an attribution requirement which this NOTICE file satisfies.
+
+Certain datasets on data.gov.sg (notably some series sourced from
+MAS, URA, and SingStat) may carry additional source-specific terms
+in addition to OGL-SG v1.0. Downstream users should consult the
+originating dataset page on data.gov.sg for any dataset-specific
+conditions before heavy commercial redistribution of a single
+dataset.
+
+Nothing in this notice limits or supersedes the MIT Licence applied
+to the software source code of sgdata-mcp itself.
