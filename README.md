@@ -462,6 +462,6 @@ intelligence work and ship it open-source so everyone else can too.
 
 Found a bug? Want a dataset added? Open an issue on
 [GitHub](https://github.com/sypherin/sgdata-mcp) or email
-[hello@altronis.sg](mailto:hello@altronis.sg).
+[hello@altronis.onmicrosoft.com](mailto:hello@altronis.onmicrosoft.com).
 
 If you build something cool on top of this, we'd love to hear about it.
