@@ -1,6 +1,6 @@
 {
   "name": "@altronis/sgdata-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Comprehensive Singapore government data MCP server — ACRA, HDB, URA, Singstat, MOM, IRAS, and more. Built by Altronis.",
   "type": "module",
   "main": "dist/index.js",
@@ -16,6 +16,14 @@
     "./core": {
       "import": "./dist/core/index.js",
       "types": "./dist/core/index.d.ts"
+    },
+    "./tools": {
+      "import": "./dist/tools/index.js",
+      "types": "./dist/tools/index.d.ts"
+    },
+    "./datasets": {
+      "import": "./dist/datasets/index.js",
+      "types": "./dist/datasets/index.d.ts"
     }
   },
   "files": [
