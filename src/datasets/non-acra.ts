@@ -40,6 +40,10 @@ import { birthsEntry, createBirthsTools } from "./births.js";
 import { crimeEntry, createCrimeTools } from "./crime.js";
 import { tourismReceiptsEntry, createTourismReceiptsTools } from "./tourism_receipts.js";
 import { hawkerCentresEntry, createHawkerCentresTools } from "./hawker_centres.js";
+import {
+  businessFormationsEntry,
+  createBusinessFormationsTools,
+} from "./business_formations.js";
 
 export {
   hdbResaleEntry,
@@ -87,6 +91,8 @@ export {
   createTourismReceiptsTools,
   hawkerCentresEntry,
   createHawkerCentresTools,
+  businessFormationsEntry,
+  createBusinessFormationsTools,
 };
 
 /**
@@ -117,6 +123,7 @@ export function allCuratedEntries(): DatasetEntry[] {
     crimeEntry,
     tourismReceiptsEntry,
     hawkerCentresEntry,
+    businessFormationsEntry,
   ];
 }
 
@@ -151,5 +158,6 @@ export function createAllCuratedTools(
     ...createCrimeTools(cache, downloader),
     ...createTourismReceiptsTools(cache, downloader),
     ...createHawkerCentresTools(cache, downloader),
+    ...createBusinessFormationsTools(cache, downloader),
   ];
 }

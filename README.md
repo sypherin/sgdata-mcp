@@ -1,6 +1,6 @@
 # @altronis/sgdata-mcp
 
-> A Singapore government data MCP server. **68 tools, 23 curated datasets, CLI mode, data visualization, cross-dataset queries, natural language queries.**
+> A Singapore government data MCP server. **71 tools, 24 curated datasets, CLI mode, data visualization, cross-dataset queries, natural language queries.**
 > Covering ACRA + HDB + URA + COE + CPI + GDP + employment + IRAS + MAS FX + MOE + ECDA + tourism + retail + population + crime + health + energy + hawkers.
 > Local SQLite cache. No API keys. Runs anywhere MCP runs.
 
@@ -18,6 +18,9 @@ demographics, energy, and more.
 It runs as a local stdio process on your machine. No hosted backend, no API
 keys, no rate limits. First-time queries fetch straight from data.gov.sg;
 repeat queries hit a local SQLite cache at `~/.sgdata-mcp/sgdata.sqlite`.
+
+**v0.3.1 highlights:** Business entity formation counts by industry via SingStat
+Table Builder -- lightweight alternative to bulk ACRA downloads.
 
 **v0.3.0 highlights:** 8 new datasets, CLI mode, ASCII sparkline visualization,
 cross-dataset correlation queries, natural language query routing.
@@ -66,7 +69,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`
 }
 ```
 
-Restart Claude Desktop. The 68 `sg_*` tools appear in the MCP tools menu.
+Restart Claude Desktop. The 71 `sg_*` tools appear in the MCP tools menu.
 
 ### Cursor
 
@@ -126,7 +129,7 @@ printf '%s\n' \
 
 ## What's in the box
 
-### Datasets (23)
+### Datasets (24)
 
 | # | Dataset | Agency | Tools |
 |---|---------|--------|-------|
@@ -153,8 +156,9 @@ printf '%s\n' \
 | 21 | **Crime Cases Recorded (annual)** | SPF | 3 |
 | 22 | **Tourism Receipts (annual)** | STB | 2 |
 | 23 | **Government Hawker Centres** | NEA | 2 |
+| 24 | **Business Entity Formations (annual)** | ACRA/DOS | 3 |
 
-Plus **3 generic fallback tools**, **1 visualization tool**, **2 cross-dataset tools**, and **1 natural language query tool**. Total: **68 tools.**
+Plus **3 generic fallback tools**, **1 visualization tool**, **2 cross-dataset tools**, and **1 natural language query tool**. Total: **71 tools.**
 
 ---
 
@@ -210,7 +214,7 @@ sgdata-cli datasets
 
 ---
 
-### Tools (68)
+### Tools (71)
 
 #### Meta tools
 
@@ -219,7 +223,7 @@ sgdata-cli datasets
 | `sg_ask` | Natural language query — ask any question about Singapore data in plain English |
 | `sg_visualize` | ASCII sparkline + summary stats + chart-ready JSON from any numeric series |
 | `sg_cross_dataset` | Compare two datasets over time with automatic period alignment |
-| `sg_list_datasets` | List all 23 curated datasets with IDs, names, and agencies |
+| `sg_list_datasets` | List all 24 curated datasets with IDs, names, and agencies |
 
 #### Generic tools — any data.gov.sg dataset
 
@@ -229,7 +233,7 @@ sgdata-cli datasets
 | `sg_dataset_schema` | Column labels, agency, format for any dataset ID |
 | `sg_dataset_query` | Query any dataset with filters, auto-downloads and caches |
 
-#### Curated dataset tools (61)
+#### Curated dataset tools (64)
 
 **ACRA** (3): `sg_acra_search_entities`, `sg_acra_get_entity`, `sg_acra_formations_by_ssic`
 
@@ -277,6 +281,8 @@ sgdata-cli datasets
 
 **Hawker Centres** (2): `sg_hawker_search`, `sg_hawker_stats`
 
+**Business Formations** (3): `sg_formations_latest`, `sg_formations_history`, `sg_formations_compare`
+
 ---
 
 ## Architecture
@@ -313,7 +319,7 @@ sgdata-cli datasets
 
 | | `@altronis/sgdata-mcp` | `sgdata-mcp` (by vdineshk) |
 |---|---|---|
-| Tools | **68** | 5 |
+| Tools | **71** | 5 |
 | Coverage | Corporate registry, real estate, prices, labour, tourism, FX, tax, public services, crime, health, demographics, energy | Real-time weather, traffic, carpark availability |
 | CLI mode | Yes | No |
 | Data visualization | Yes (sparklines + chart-ready JSON) | No |
@@ -356,7 +362,7 @@ independently verify any data before making decisions based on it**.
 
 **How often is data refreshed?** Per-dataset, from daily to annually.
 
-**Is this production-ready?** Yes. 68 tools, all tested against live data.
+**Is this production-ready?** Yes. 71 tools, all tested against live data.
 File issues on GitHub if you hit anything sharp.
 
 **Can I add my own dataset?** Yes — either use the generic tools for ad-hoc
