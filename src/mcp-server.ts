@@ -35,6 +35,9 @@ import type { ZodError } from "zod";
 import { DatasetCache, DatasetDownloader, registerDatasets } from "./core/index.js";
 import { createGenericTools, type ToolDef } from "./tools/index.js";
 import { allDatasetEntries, createAllDatasetTools } from "./datasets/index.js";
+import { createVisualizationTools } from "./tools/visualization.js";
+import { createCrossDatasetTools } from "./tools/cross_dataset.js";
+import { createNlQueryTools } from "./tools/nl_query.js";
 
 // ---------------------------------------------------------------------------
 // Env / paths
@@ -64,10 +67,18 @@ function buildToolRegistry(
   cache: DatasetCache,
   downloader: DatasetDownloader,
 ): ToolDef[] {
-  return [
+  const base: ToolDef[] = [
     ...createGenericTools(cache, downloader),
     ...createAllDatasetTools(cache, downloader),
+    ...createVisualizationTools(),
+    ...createCrossDatasetTools(cache, downloader),
   ];
+  // NL query needs the full tool map to route queries
+  const byName = new Map<string, ToolDef>();
+  for (const t of base) byName.set(t.name, t);
+  const nlTools = createNlQueryTools(byName);
+  for (const t of nlTools) byName.set(t.name, t);
+  return [...byName.values()];
 }
 
 // ---------------------------------------------------------------------------
@@ -117,7 +128,7 @@ async function main(): Promise<void> {
   const server = new Server(
     {
       name: "sgdata-mcp",
-      version: "0.1.0",
+      version: "0.3.0",
     },
     {
       capabilities: {

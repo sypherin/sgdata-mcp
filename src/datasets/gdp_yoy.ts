@@ -92,7 +92,7 @@ export function createGdpYoyTools(
       handler: async (input: unknown) => {
         const p = latestInput.parse(input);
         const rows = await fetchAll();
-        const needle = p.industry ?? "GDP At Constant";
+        const needle = p.industry ?? "GDP";
         const matching = rows.filter((r) => matchIndustry(r, needle));
         if (matching.length === 0) {
           return {

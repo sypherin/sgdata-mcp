@@ -1,10 +1,5 @@
 /**
  * Aggregator for all non-ACRA curated dataset handlers.
- *
- * The final `src/datasets/index.ts` barrel is being merged by another agent
- * who is writing the ACRA handler in parallel. This file exists so the
- * non-ACRA handlers can be registered as a single bundle from that merge
- * step or directly from src/index.ts while ACRA lands.
  */
 
 import type { DatasetCache, DatasetDownloader, DatasetEntry } from "../core/index.js";
@@ -36,6 +31,15 @@ import {
   createIrasTaxCollectionTools,
 } from "./iras_tax_collection.js";
 import { ecdaChildcareEntry, createEcdaChildcareTools } from "./ecda_childcare.js";
+// v0.3.0 datasets
+import { unemploymentEntry, createUnemploymentTools } from "./unemployment.js";
+import { populationEntry, createPopulationTools } from "./population.js";
+import { diseaseCasesEntry, createDiseaseCasesTools } from "./disease_cases.js";
+import { electricityEntry, createElectricityTools } from "./electricity.js";
+import { birthsEntry, createBirthsTools } from "./births.js";
+import { crimeEntry, createCrimeTools } from "./crime.js";
+import { tourismReceiptsEntry, createTourismReceiptsTools } from "./tourism_receipts.js";
+import { hawkerCentresEntry, createHawkerCentresTools } from "./hawker_centres.js";
 
 export {
   hdbResaleEntry,
@@ -66,10 +70,27 @@ export {
   createIrasTaxCollectionTools,
   ecdaChildcareEntry,
   createEcdaChildcareTools,
+  // v0.3.0
+  unemploymentEntry,
+  createUnemploymentTools,
+  populationEntry,
+  createPopulationTools,
+  diseaseCasesEntry,
+  createDiseaseCasesTools,
+  electricityEntry,
+  createElectricityTools,
+  birthsEntry,
+  createBirthsTools,
+  crimeEntry,
+  createCrimeTools,
+  tourismReceiptsEntry,
+  createTourismReceiptsTools,
+  hawkerCentresEntry,
+  createHawkerCentresTools,
 };
 
 /**
- * Return all 14 non-ACRA curated dataset registry entries.
+ * Return all 22 non-ACRA curated dataset registry entries.
  */
 export function allCuratedEntries(): DatasetEntry[] {
   return [
@@ -87,11 +108,20 @@ export function allCuratedEntries(): DatasetEntry[] {
     masFxEntry,
     irasTaxCollectionEntry,
     ecdaChildcareEntry,
+    // v0.3.0
+    unemploymentEntry,
+    populationEntry,
+    diseaseCasesEntry,
+    electricityEntry,
+    birthsEntry,
+    crimeEntry,
+    tourismReceiptsEntry,
+    hawkerCentresEntry,
   ];
 }
 
 /**
- * Build the full set of ToolDefs for all 14 non-ACRA curated datasets.
+ * Build the full set of ToolDefs for all 22 non-ACRA curated datasets.
  */
 export function createAllCuratedTools(
   cache: DatasetCache,
@@ -112,5 +142,14 @@ export function createAllCuratedTools(
     ...createMasFxTools(cache, downloader),
     ...createIrasTaxCollectionTools(cache, downloader),
     ...createEcdaChildcareTools(cache, downloader),
+    // v0.3.0
+    ...createUnemploymentTools(cache, downloader),
+    ...createPopulationTools(cache, downloader),
+    ...createDiseaseCasesTools(cache, downloader),
+    ...createElectricityTools(cache, downloader),
+    ...createBirthsTools(cache, downloader),
+    ...createCrimeTools(cache, downloader),
+    ...createTourismReceiptsTools(cache, downloader),
+    ...createHawkerCentresTools(cache, downloader),
   ];
 }
