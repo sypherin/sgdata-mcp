@@ -381,6 +381,9 @@ Built and maintained by **[Altronis](https://altronis.sg)** — a Singapore AI
 consultancy. We use this server internally for Singapore business intelligence
 work and ship it open-source so everyone else can too.
 
+Read the full writeup: **[sgdata-mcp: 68 Tools for Singapore Government
+Data](https://altronis.sg/blog/sgdata-mcp)**
+
 Found a bug? Want a dataset added? Open an issue on
 [GitHub](https://github.com/sypherin/sgdata-mcp) or email
 [hello@altronis.sg](mailto:hello@altronis.sg).
