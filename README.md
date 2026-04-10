@@ -326,6 +326,28 @@ Both packages complement each other — install both for the full picture.
 
 ---
 
+## Disclaimer
+
+This tool fetches and caches data from [data.gov.sg](https://data.gov.sg).
+While we take care to preserve data integrity during ingestion, **you should
+independently verify any data before making decisions based on it**.
+
+- **Data accuracy.** All data originates from Singapore government agencies via
+  data.gov.sg. We do not alter source values, but column mappings, wide-to-long
+  transformations, and caching may introduce discrepancies. Always cross-check
+  critical figures against the [official source](https://data.gov.sg).
+- **Not professional advice.** This tool is not a substitute for professional
+  financial, legal, medical, or policy advice. GDP figures, crime statistics,
+  disease counts, property prices, and other data are provided for informational
+  purposes only.
+- **Staleness.** Cached data may be hours to weeks behind the source depending
+  on the dataset's refresh window. Check `ingestedAt` timestamps if freshness
+  matters.
+- **No warranty.** This software is provided "as is" under the MIT licence,
+  without warranty of any kind.
+
+---
+
 ## FAQ
 
 **Do I need an API key?** No. data.gov.sg open datasets are public.
