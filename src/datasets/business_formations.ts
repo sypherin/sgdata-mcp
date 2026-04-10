@@ -2,20 +2,28 @@
  * Business Entity Formations & Cessations — SingStat Table Builder.
  *
  * Source: SingStat Table Builder API (free, no auth, JSON).
- * Table M085851: Formation of All Business Entities By Detailed Industry, Annual.
+ *   M085851: Formation of All Business Entities By Detailed Industry, Annual.
+ *   M085831: Formation of All Business Entities By Detailed Industry, Monthly.
+ *   M085841: Cessation of All Business Entities By Detailed Industry, Monthly.
  * Data from ACRA, aggregated by DOS/SingStat.
  *
  * This handler does NOT use the data.gov.sg download pipeline. It calls the
  * SingStat Table Builder API directly and caches the parsed result in memory
  * with a 24-hour TTL. The response is ~50 KB of JSON, so no SQLite needed.
+ *
+ * Monthly tables have 434 columns (Jan 1990 – present). The API cell limit
+ * is 5000, so we use the `search` query param to fetch one row at a time
+ * rather than paginating.
  */
 
 import { z } from "zod";
 import type { DatasetCache, DatasetDownloader, DatasetEntry } from "../core/index.js";
 import type { ToolDef } from "../tools/index.js";
 
-const TABLE_ID = "M085851";
-const API_URL = `https://tablebuilder.singstat.gov.sg/api/table/tabledata/${TABLE_ID}`;
+const TABLE_ANNUAL = "M085851";
+const TABLE_MONTHLY_FORMATIONS = "M085831";
+const TABLE_MONTHLY_CESSATIONS = "M085841";
+const API_BASE = "https://tablebuilder.singstat.gov.sg/api/table/tabledata";
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 export const businessFormationsEntry: DatasetEntry = {
@@ -56,11 +64,26 @@ interface ParsedIndustry {
   values: Record<string, number>;  // { "2020": 5123, "2021": 5456, ... }
 }
 
+interface MonthlyPoint {
+  month: string;      // "2026 Feb"
+  sortKey: string;    // "2026-02"
+  value: number;
+}
+
+interface MonthlySeries {
+  ssic: string;
+  description: string;
+  points: MonthlyPoint[];
+}
+
 // ---------------------------------------------------------------------------
-// In-memory cache
+// In-memory caches
 // ---------------------------------------------------------------------------
 
 let _cache: { data: ParsedIndustry[]; years: string[]; fetchedAt: number } | null = null;
+
+/** Monthly cache keyed by "tableId:searchTerm" */
+const _monthlyCache = new Map<string, { series: MonthlySeries; fetchedAt: number }>();
 
 function parseRow(row: SingStatRow): ParsedIndustry {
   // Extract SSIC code from rowText like "SSIC 62 Computer Programming..."
@@ -85,7 +108,7 @@ async function fetchFormations(): Promise<{ industries: ParsedIndustry[]; years:
     return { industries: _cache.data, years: _cache.years };
   }
 
-  const res = await fetch(API_URL);
+  const res = await fetch(`${API_BASE}/${TABLE_ANNUAL}`);
   if (!res.ok) {
     throw new Error(`SingStat API returned ${res.status}: ${res.statusText}`);
   }
@@ -105,6 +128,80 @@ async function fetchFormations(): Promise<{ industries: ParsedIndustry[]; years:
 
   _cache = { data: industries, years, fetchedAt: Date.now() };
   return { industries, years };
+}
+
+// ---------------------------------------------------------------------------
+// Monthly fetch helper
+// ---------------------------------------------------------------------------
+
+const MONTH_ABBRS: Record<string, string> = {
+  Jan: "01", Feb: "02", Mar: "03", Apr: "04", May: "05", Jun: "06",
+  Jul: "07", Aug: "08", Sep: "09", Oct: "10", Nov: "11", Dec: "12",
+};
+
+function monthKeyToSort(key: string): string {
+  // "2026 Feb" → "2026-02"
+  const parts = key.split(" ");
+  if (parts.length !== 2) return key;
+  return `${parts[0]}-${MONTH_ABBRS[parts[1]] ?? "00"}`;
+}
+
+/**
+ * Fetch a single row from a monthly table using the `search` query param.
+ * The API has a 5000-cell limit. Monthly tables have 434 cols/row, so
+ * fetching one row at a time avoids pagination entirely (~15 KB per request).
+ */
+async function fetchMonthlySeries(
+  tableId: string,
+  ssic: string,
+): Promise<MonthlySeries> {
+  const searchTerm = ssic.toLowerCase() === "total" ? "Total" : `SSIC ${ssic}`;
+  const cacheKey = `${tableId}:${searchTerm}`;
+  const cached = _monthlyCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+    return cached.series;
+  }
+
+  const url = `${API_BASE}/${tableId}?search=${encodeURIComponent(searchTerm)}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`SingStat API (${tableId}) returned ${res.status}: ${res.statusText}`);
+  }
+  const json = await res.json();
+  const rows: SingStatRow[] = json?.Data?.row ?? [];
+
+  if (!rows.length) {
+    throw new Error(
+      `No data found for "${searchTerm}" in table ${tableId}. ` +
+      `Use sg_formations_latest to discover available SSIC codes.`,
+    );
+  }
+
+  // Take the first matching row
+  const row = rows[0];
+  const parsed = parseRow(row);
+
+  const points: MonthlyPoint[] = [];
+  for (const col of row.columns) {
+    const n = parseInt(col.value, 10);
+    if (Number.isFinite(n) && /^\d{4}\s\w{3}$/.test(col.key)) {
+      points.push({
+        month: col.key,
+        sortKey: monthKeyToSort(col.key),
+        value: n,
+      });
+    }
+  }
+  points.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+
+  const series: MonthlySeries = {
+    ssic: parsed.ssic,
+    description: parsed.description,
+    points,
+  };
+
+  _monthlyCache.set(cacheKey, { series, fetchedAt: Date.now() });
+  return series;
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +413,207 @@ export function createBusinessFormationsTools(
           total_formations: total?.values[targetYear] ?? null,
           industries: compared,
           count: compared.length,
+        };
+      },
+    },
+
+    // ── Monthly tools ──────────────────────────────────────────────────
+
+    {
+      name: "sg_formations_monthly",
+      description:
+        "Get monthly business formation counts for a specific industry " +
+        "or all industries (Total). Returns monthly time series from " +
+        "Jan 1990 to present. Data from ACRA via SingStat Table Builder.",
+      inputSchema: z.object({
+        ssic: z
+          .string()
+          .optional()
+          .describe(
+            "SSIC code (e.g. '62' for IT, '70' for Management Consultancy). " +
+            "Default 'Total' for all industries.",
+          ),
+        months_back: z
+          .number()
+          .int()
+          .positive()
+          .max(434)
+          .optional()
+          .describe("Limit to last N months. Default 24."),
+      }),
+      handler: async (input: unknown) => {
+        const p = z
+          .object({
+            ssic: z.string().optional(),
+            months_back: z.number().int().positive().max(434).optional(),
+          })
+          .parse(input);
+
+        const ssic = p.ssic || "Total";
+        const monthsBack = p.months_back ?? 24;
+        const series = await fetchMonthlySeries(TABLE_MONTHLY_FORMATIONS, ssic);
+        const points = series.points.slice(-monthsBack);
+
+        const vals = points.map((pt) => pt.value);
+        const latest = vals[vals.length - 1] ?? 0;
+        const prev = vals.length >= 2 ? vals[vals.length - 2] : null;
+        const momChange = prev != null ? latest - prev : null;
+        const momPct = prev ? ((momChange! / prev) * 100).toFixed(1) : null;
+
+        return {
+          source: `SingStat Table Builder (${TABLE_MONTHLY_FORMATIONS})`,
+          ssic: series.ssic,
+          description: series.description,
+          count: points.length,
+          series: points,
+          latest: {
+            month: points[points.length - 1]?.month ?? null,
+            formations: latest,
+            mom_change: momChange,
+            mom_pct: momPct ? `${momPct}%` : null,
+          },
+        };
+      },
+    },
+
+    {
+      name: "sg_cessations_monthly",
+      description:
+        "Get monthly business cessation (closure/deregistration) counts " +
+        "for a specific industry or all industries (Total). Returns " +
+        "monthly time series from Jan 1990 to present. Data from ACRA " +
+        "via SingStat Table Builder.",
+      inputSchema: z.object({
+        ssic: z
+          .string()
+          .optional()
+          .describe(
+            "SSIC code (e.g. '62' for IT, '70' for Management Consultancy). " +
+            "Default 'Total' for all industries.",
+          ),
+        months_back: z
+          .number()
+          .int()
+          .positive()
+          .max(434)
+          .optional()
+          .describe("Limit to last N months. Default 24."),
+      }),
+      handler: async (input: unknown) => {
+        const p = z
+          .object({
+            ssic: z.string().optional(),
+            months_back: z.number().int().positive().max(434).optional(),
+          })
+          .parse(input);
+
+        const ssic = p.ssic || "Total";
+        const monthsBack = p.months_back ?? 24;
+        const series = await fetchMonthlySeries(TABLE_MONTHLY_CESSATIONS, ssic);
+        const points = series.points.slice(-monthsBack);
+
+        const vals = points.map((pt) => pt.value);
+        const latest = vals[vals.length - 1] ?? 0;
+        const prev = vals.length >= 2 ? vals[vals.length - 2] : null;
+        const momChange = prev != null ? latest - prev : null;
+        const momPct = prev ? ((momChange! / prev) * 100).toFixed(1) : null;
+
+        return {
+          source: `SingStat Table Builder (${TABLE_MONTHLY_CESSATIONS})`,
+          ssic: series.ssic,
+          description: series.description,
+          count: points.length,
+          series: points,
+          latest: {
+            month: points[points.length - 1]?.month ?? null,
+            cessations: latest,
+            mom_change: momChange,
+            mom_pct: momPct ? `${momPct}%` : null,
+          },
+        };
+      },
+    },
+
+    {
+      name: "sg_net_formations",
+      description:
+        "Get net business growth (formations minus cessations) by month " +
+        "for a specific industry or all industries. Positive = more " +
+        "companies created than closed. Data from ACRA via SingStat.",
+      inputSchema: z.object({
+        ssic: z
+          .string()
+          .optional()
+          .describe(
+            "SSIC code (e.g. '62' for IT). Default 'Total' for all industries.",
+          ),
+        months_back: z
+          .number()
+          .int()
+          .positive()
+          .max(434)
+          .optional()
+          .describe("Limit to last N months. Default 24."),
+      }),
+      handler: async (input: unknown) => {
+        const p = z
+          .object({
+            ssic: z.string().optional(),
+            months_back: z.number().int().positive().max(434).optional(),
+          })
+          .parse(input);
+
+        const ssic = p.ssic || "Total";
+        const monthsBack = p.months_back ?? 24;
+
+        // Fetch both in parallel
+        const [formations, cessations] = await Promise.all([
+          fetchMonthlySeries(TABLE_MONTHLY_FORMATIONS, ssic),
+          fetchMonthlySeries(TABLE_MONTHLY_CESSATIONS, ssic),
+        ]);
+
+        // Build cessation lookup by sortKey
+        const cessMap = new Map<string, number>();
+        for (const pt of cessations.points) {
+          cessMap.set(pt.sortKey, pt.value);
+        }
+
+        // Compute net for each month
+        const netSeries = formations.points
+          .map((pt) => {
+            const cess = cessMap.get(pt.sortKey) ?? 0;
+            return {
+              month: pt.month,
+              sortKey: pt.sortKey,
+              formations: pt.value,
+              cessations: cess,
+              net: pt.value - cess,
+            };
+          })
+          .slice(-monthsBack);
+
+        const nets = netSeries.map((s) => s.net);
+        const latestNet = nets[nets.length - 1] ?? 0;
+        const avgNet =
+          nets.length > 0
+            ? Math.round(nets.reduce((a, b) => a + b, 0) / nets.length)
+            : 0;
+        const positiveMonths = nets.filter((n) => n > 0).length;
+
+        return {
+          source: "SingStat Table Builder (M085831 + M085841)",
+          ssic: formations.ssic,
+          description: formations.description,
+          count: netSeries.length,
+          series: netSeries,
+          summary: {
+            latest_month: netSeries[netSeries.length - 1]?.month ?? null,
+            latest_net: latestNet,
+            avg_monthly_net: avgNet,
+            positive_months: positiveMonths,
+            total_months: netSeries.length,
+            total_net: nets.reduce((a, b) => a + b, 0),
+          },
         };
       },
     },
