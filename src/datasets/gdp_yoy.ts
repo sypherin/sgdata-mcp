@@ -11,6 +11,7 @@
  */
 
 import { z } from "zod";
+import { buildFreshness } from "../core/freshness.js";
 import type { DatasetCache, DatasetDownloader, DatasetEntry } from "../core/index.js";
 import type { ToolDef } from "../tools/index.js";
 
@@ -108,6 +109,7 @@ export function createGdpYoyTools(
           datasetId: gdpYoyEntry.datasetId,
           query: needle,
           latest_quarter: latestCol ? prettyQuarter(latestCol) : null,
+          data_freshness: latestCol ? buildFreshness(prettyQuarter(latestCol), { kindHint: "quarterly" }) : null,
           matches: matching.map((r) => ({
             industry: r.DataSeries,
             yoy_growth: latestCol ? r[latestCol] : null,

@@ -7,6 +7,7 @@
  */
 
 import { z } from "zod";
+import { buildFreshness } from "../core/freshness.js";
 import type { DatasetCache, DatasetDownloader, DatasetEntry } from "../core/index.js";
 import type { ToolDef } from "../tools/index.js";
 
@@ -70,6 +71,7 @@ export function createUnemploymentTools(
         return {
           datasetId: unemploymentEntry.datasetId,
           latest_period: latestPeriod,
+          data_freshness: latestPeriod ? buildFreshness(latestPeriod, { kindHint: "monthly" }) : null,
           count: latest.length,
           rates: latest.map((r) => ({
             period: r.period,

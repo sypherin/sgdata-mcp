@@ -28,3 +28,6 @@ export {
   listDatasets,
 } from "./registry.js";
 export type { DatasetEntry } from "./registry.js";
+
+export { buildFreshness, parsePeriodToDate } from "./freshness.js";
+export type { DataFreshness, FreshnessLevel, PeriodKind } from "./freshness.js";

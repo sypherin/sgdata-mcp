@@ -19,14 +19,53 @@ It runs as a local stdio process on your machine. No hosted backend, no API
 keys, no rate limits. First-time queries fetch straight from data.gov.sg;
 repeat queries hit a local SQLite cache at `~/.sgdata-mcp/sgdata.sqlite`.
 
-**v0.3.2 highlights:** Monthly business formations + cessations + net growth
-tools via SingStat Table Builder. Track month-by-month company creation vs
-closure for any SSIC industry. 74 tools total.
+**v0.4.0 highlights:** `data_freshness` metadata block emitted on every
+`_latest` tool — `last_period`, `last_record_date`, `age_days`, and a
+categorical `level` of `fresh` / `ok` / `stale` / `frozen` so agents can
+detect when an upstream data.gov.sg feed has gone silent. Fixes silent
+stale-data on `sg_disease_latest` (MOH stopped publishing the Weekly
+Infectious Disease Bulletin via data.gov.sg around epi week 2022-W52).
+
+**v0.3.2:** Monthly business formations + cessations + net growth tools via
+SingStat Table Builder. Track month-by-month company creation vs closure
+for any SSIC industry. 74 tools total.
 
 **v0.3.1:** Annual formation counts by industry via SingStat Table Builder.
 
 **v0.3.0:** 8 new datasets, CLI mode, ASCII sparkline visualization,
 cross-dataset correlation queries, natural language query routing.
+
+## Data freshness
+
+`@altronis/sgdata-mcp` is only as fresh as data.gov.sg. Some datasets are
+updated weekly (COE bidding, CPI), some monthly (unemployment, CPI sub-items),
+some quarterly (URA private property), and some have effectively stopped
+updating. Starting in v0.4.0 every `_latest` tool returns a `data_freshness`
+block so you can detect drift programmatically:
+
+```json
+{
+  "datasetId": "d_ca168b2cb763640d72c4600a68f9909e",
+  "epi_week": "2022-W52",
+  "cases": [...],
+  "data_freshness": {
+    "last_period": "2022-W52",
+    "last_record_date": "2023-01-01",
+    "age_days": 1234,
+    "level": "frozen",
+    "warning": "Upstream dataset appears frozen — latest record is 2022-W52..."
+  }
+}
+```
+
+**Known frozen datasets (as of v0.4.0):**
+
+| Tool | Upstream dataset | Last update | Recommended action |
+|---|---|---|---|
+| `sg_disease_latest`, `sg_disease_trend`, `sg_disease_list` | MOH Weekly Infectious Disease Bulletin | 2022-W52 | Cross-check `moh.gov.sg` weekly bulletin PDFs. PRs welcome to swap in a live source. |
+
+If you find another upstream feed has gone silent, please open an issue —
+we'll add it to this table and surface the warning in the tool description.
 
 ---
 

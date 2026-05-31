@@ -7,6 +7,7 @@
  */
 
 import { z } from "zod";
+import { buildFreshness } from "../core/freshness.js";
 import type { DatasetCache, DatasetDownloader, DatasetEntry } from "../core/index.js";
 import type { ToolDef } from "../tools/index.js";
 
@@ -15,9 +16,15 @@ export const diseaseCasesEntry: DatasetEntry = {
   datasetId: "d_ca168b2cb763640d72c4600a68f9909e",
   shardCollection: false,
   name: "Weekly Infectious Disease Bulletin Cases",
+  // NOTE: this upstream feed appears frozen since epi week 2022-W52 — MOH
+  // seems to have stopped publishing via data.gov.sg and moved to its own
+  // weekly bulletin PDF on moh.gov.sg. v0.4.0 attaches a `data_freshness`
+  // block to every disease tool response so callers can detect this.
   description:
-    "MOH weekly infectious disease case counts — dengue, HFMD, " +
-    "chickenpox, measles, tuberculosis, and more.",
+    "MOH weekly infectious disease case counts — dengue, HFMD, chickenpox, " +
+    "measles, tuberculosis, and more. KNOWN ISSUE: upstream data.gov.sg " +
+    "feed appears frozen since 2022-W52; see data_freshness.warning in the " +
+    "response.",
   agency: "MOH",
   refreshDays: 7,
   tags: ["health", "disease", "dengue", "moh"],
@@ -46,7 +53,9 @@ export function createDiseaseCasesTools(
       description:
         "Get the most recent week's infectious disease case counts. " +
         "Optionally filter by disease name (substring match, e.g. " +
-        "'Dengue', 'HFMD', 'Tuberculosis').",
+        "'Dengue', 'HFMD', 'Tuberculosis'). KNOWN ISSUE: upstream MOH feed " +
+        "on data.gov.sg appears frozen since 2022-W52 — check the returned " +
+        "`data_freshness.level` field; `frozen` means cross-check moh.gov.sg.",
       inputSchema: z.object({
         disease: z.string().optional(),
       }),
@@ -70,6 +79,7 @@ export function createDiseaseCasesTools(
             disease: r.disease,
             cases: toNum(r.no__of_cases) ?? toNum(r["no._of_cases"]),
           })),
+          data_freshness: buildFreshness(latestWeek, { kindHint: "weekly" }),
         };
       },
     },
@@ -100,6 +110,9 @@ export function createDiseaseCasesTools(
             ),
           );
         const trimmed = p.weeks_back ? rows.slice(-p.weeks_back) : rows;
+        const lastWeek = trimmed.length
+          ? ((trimmed[trimmed.length - 1].epi_week as string) ?? "")
+          : "";
         return {
           datasetId: diseaseCasesEntry.datasetId,
           disease: p.disease,
@@ -108,6 +121,9 @@ export function createDiseaseCasesTools(
             epi_week: r.epi_week,
             cases: toNum(r.no__of_cases) ?? toNum(r["no._of_cases"]),
           })),
+          data_freshness: lastWeek
+            ? buildFreshness(lastWeek, { kindHint: "weekly" })
+            : null,
         };
       },
     },

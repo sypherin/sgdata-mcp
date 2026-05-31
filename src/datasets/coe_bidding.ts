@@ -7,6 +7,7 @@
  */
 
 import { z } from "zod";
+import { buildFreshness } from "../core/freshness.js";
 import type { DatasetCache, DatasetDownloader, DatasetEntry } from "../core/index.js";
 import type { ToolDef } from "../tools/index.js";
 
@@ -89,10 +90,12 @@ export function createCoeBiddingTools(
             (b.vehicle_class as string) ?? "",
           ),
         );
+        const latestMonth = latest.length ? ((latest[0].month as string) ?? "") : "";
         return {
           datasetId: coeBiddingEntry.datasetId,
           count: latest.length,
           latest,
+          data_freshness: latestMonth ? buildFreshness(latestMonth, { kindHint: "monthly" }) : null,
         };
       },
     },

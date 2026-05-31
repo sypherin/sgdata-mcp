@@ -144,14 +144,25 @@ export function createHdbResaleTools(
         const prices = filtered
           .map((r) => toNumber(r.resale_price))
           .filter((n): n is number => n != null);
+        // Don't use Math.min(...prices) / Math.max(...prices) here — when
+        // sg_hdb_resale_stats is called without filters, `prices` can have
+        // 200k+ elements and spreading that many arguments blows past
+        // Node's call-stack limit with `RangeError: Maximum call stack size
+        // exceeded`. Reduce in a single linear pass instead.
+        let minPrice: number | null = null;
+        let maxPrice: number | null = null;
+        for (const n of prices) {
+          if (minPrice === null || n < minPrice) minPrice = n;
+          if (maxPrice === null || n > maxPrice) maxPrice = n;
+        }
         return {
           datasetId: hdbResaleEntry.datasetId,
           filters: p,
           count: filtered.length,
           median: median(prices),
           mean: mean(prices),
-          min: prices.length ? Math.min(...prices) : null,
-          max: prices.length ? Math.max(...prices) : null,
+          min: minPrice,
+          max: maxPrice,
         };
       },
     },

@@ -10,6 +10,7 @@
  */
 
 import { z } from "zod";
+import { buildFreshness } from "../core/freshness.js";
 import type { DatasetCache, DatasetDownloader, DatasetEntry } from "../core/index.js";
 import type { ToolDef } from "../tools/index.js";
 
@@ -130,6 +131,7 @@ export function createCpiMonthlyTools(
           datasetId: cpiMonthlyEntry.datasetId,
           query: needle,
           latest_month: latestCol ? prettyMonth(latestCol) : null,
+          data_freshness: latestCol ? buildFreshness(prettyMonth(latestCol), { kindHint: "monthly" }) : null,
           matches: matching.map((r) => {
             const latestVal = latestCol ? toNumber(r[latestCol]) : null;
             const yaCol = latestCol ? yearAgoCol(latestCol, r) : null;
