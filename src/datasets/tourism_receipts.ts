@@ -8,6 +8,7 @@
 
 import { z } from "zod";
 import type { DatasetCache, DatasetDownloader, DatasetEntry } from "../core/index.js";
+import { buildFreshness } from "../core/freshness.js";
 import type { ToolDef } from "../tools/index.js";
 
 export const tourismReceiptsEntry: DatasetEntry = {
@@ -58,6 +59,11 @@ export function createTourismReceiptsTools(
           datasetId: tourismReceiptsEntry.datasetId,
           period: latestPeriod,
           count: latest.length,
+          // STB's annual-receipts dataset on data.gov.sg stops at 2014; surface
+          // that staleness rather than presenting it as current (see disease).
+          data_freshness: latestPeriod
+            ? buildFreshness(String(latestPeriod), { kindHint: "annual" })
+            : null,
           components: latest.map((r) => ({
             component: r.components,
             total_receipts_million: toNum(r.tot_tr),
@@ -83,7 +89,8 @@ export function createTourismReceiptsTools(
             years_back: z.number().int().positive().max(50).optional(),
           })
           .parse(input);
-        const rows = (await fetchAll())
+        const all = await fetchAll();
+        const rows = all
           .filter((r) =>
             (r.components ?? "")
               .toLowerCase()
@@ -102,6 +109,15 @@ export function createTourismReceiptsTools(
             total_receipts_million: toNum(r.tot_tr),
             per_capita_expenditure: toNum(r.trpce),
           })),
+          ...(trimmed.length === 0
+            ? {
+                available: [
+                  ...new Set(
+                    all.map((r) => (r.components ?? "").trim()).filter(Boolean),
+                  ),
+                ],
+              }
+            : {}),
         };
       },
     },

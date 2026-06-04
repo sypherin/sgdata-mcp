@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.1 — 2026-06-04
+
+### Bug fixes
+
+- **`sg_dataset_query` hung on very large datasets.** It ingested the entire
+  dataset into the local SQLite cache before querying, which blew the call's
+  time budget on multi-hundred-MB datasets (e.g. Historical Rainfall, ~1.2 GB).
+  It now size-gates: datasets over 20 MB are paged server-side via
+  `datastore_search` (bounded, no full download), and if a large dataset has no
+  server-side endpoint it returns a clear "too large — use the curated tool"
+  error instead of hanging. A 60s ingest time-guard covers size-unreported
+  datasets. Normal/small datasets are unchanged (fast cached SQL).
+- **`sg_fx_rate` / `sg_fx_history` returned null/empty for ISO currency codes.**
+  "USD" never matched the MAS label "US Dollar". Added an ISO-4217 → label map
+  and space-insensitive matching, so `USD`, `GBP`, `JPY`, `EUR`, etc. resolve.
+
+### Improvements
+
+- **`sg_tourism_latest` now emits `data_freshness`.** STB's annual receipts
+  dataset stops at 2014; the response now carries the same `frozen` freshness
+  warning that `sg_disease_*` does, instead of presenting 2014 as current.
+- **`_history` tools now return an `available` list on a no-match.** When a
+  `crime_type` / `source` / `currency` filter matches nothing, the response
+  includes the valid labels so callers can self-correct (was a silent empty).
+
 ## 0.4.0 — 2026-05-19
 
 ### Bug fixes

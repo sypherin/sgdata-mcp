@@ -21,7 +21,7 @@ import type {
   DatasetDownloader,
   DatasetEntry,
 } from "../core/index.js";
-import { getDatasetMetadata } from "../core/index.js";
+import { getDatasetMetadata, datastoreSearch } from "../core/index.js";
 
 // ---------------------------------------------------------------------------
 // Shared HTTP helper. We use globalThis fetch (Node 20+) — no axios.
@@ -217,10 +217,58 @@ export interface DatasetQueryOutput {
   rows: Array<Record<string, unknown>>;
   cached: boolean;
   ingestedAt?: string;
+  /** How the rows were sourced — set when the local ingest was bypassed. */
+  source?: string;
 }
 
 /** Default refresh policy for ad-hoc datasets queried via sg_dataset_query. */
 const GENERIC_REFRESH_DAYS = 30;
+
+/** Above this dataset size we skip the full local SQLite ingest (it would blow
+ *  the MCP call's time budget) and page rows server-side instead. */
+const LARGE_DATASET_BYTES = 20 * 1024 * 1024;
+/** If a local ingest hasn't finished within this budget, bail out gracefully
+ *  instead of hanging the client; the download keeps caching in the background. */
+const INGEST_BUDGET_MS = 60_000;
+
+/**
+ * Page a dataset's rows straight from data.gov.sg's `datastore_search` API —
+ * no full download. Maps human column labels back to raw field names for
+ * exact-match filters; `like` substrings become a full-text `q`.
+ */
+async function serverSidePage(
+  datasetId: string,
+  columnLabels: Record<string, string>,
+  filters: Record<string, string | number> | undefined,
+  like: Record<string, string> | undefined,
+  limit: number,
+  offset: number,
+  source: string,
+): Promise<DatasetQueryOutput> {
+  const labelToRaw = new Map<string, string>();
+  for (const [raw, label] of Object.entries(columnLabels)) {
+    if (label) labelToRaw.set(label, raw);
+  }
+  const rawFilters: Record<string, string> = {};
+  for (const [k, v] of Object.entries(filters ?? {})) {
+    rawFilters[labelToRaw.get(k) ?? k] = String(v);
+  }
+  const q = Object.values(like ?? {}).map(String).join(" ") || undefined;
+  const res = await datastoreSearch<Record<string, unknown>>(datasetId, {
+    limit,
+    offset,
+    q,
+    filters: Object.keys(rawFilters).length > 0 ? rawFilters : undefined,
+  });
+  return {
+    datasetId,
+    total: res.total,
+    returned: res.records.length,
+    rows: res.records,
+    cached: false,
+    source,
+  };
+}
 
 /**
  * sg_dataset_query — runs against the local cache, downloading the dataset
@@ -256,7 +304,31 @@ export async function sgDatasetQuery(
     );
   }
 
-  // 2. Make sure the dataset is in the local cache (downloader is no-op if
+  // 2a. Large datasets would blow the MCP call's time budget on a full local
+  //     ingest (e.g. Historical Rainfall = millions of rows). Page them
+  //     server-side via datastore_search instead — bounded, ~1s, no download.
+  const sizeBytes = meta.datasetSize ?? 0;
+  if (sizeBytes > LARGE_DATASET_BYTES) {
+    try {
+      return await serverSidePage(
+        parsed.datasetId,
+        meta.columnLabels,
+        parsed.filters,
+        parsed.like,
+        limit,
+        offset,
+        `datastore_search (server-side; ${(sizeBytes / 1e6).toFixed(0)} MB dataset, skipped local ingest)`,
+      );
+    } catch {
+      throw new Error(
+        `Dataset ${parsed.datasetId} is ${(sizeBytes / 1e6).toFixed(0)} MB — too large to ingest ` +
+          `locally, and it doesn't support server-side pagination (datastore_search). ` +
+          `Use the curated sg_* tool for this domain, or query a smaller dataset.`,
+      );
+    }
+  }
+
+  // 2b. Make sure the dataset is in the local cache (downloader is no-op if
   //    fresh, refetches if stale per refreshDays).
   const syntheticEntry: DatasetEntry = {
     id: `generic_${parsed.datasetId}`,
@@ -267,7 +339,37 @@ export async function sgDatasetQuery(
     refreshDays: GENERIC_REFRESH_DAYS,
     tags: [],
   };
-  await downloader.ensureFresh(syntheticEntry);
+  // Time-bound the ingest so an unexpectedly huge (or size-unreported) dataset
+  // can't hang the client. On overrun, fall back to server-side paging; if that
+  // isn't available, surface a clear "still indexing" message.
+  let ingestTimedOut = false;
+  await Promise.race([
+    downloader.ensureFresh(syntheticEntry),
+    new Promise<void>((resolve) =>
+      setTimeout(() => {
+        ingestTimedOut = true;
+        resolve();
+      }, INGEST_BUDGET_MS),
+    ),
+  ]);
+  if (ingestTimedOut && !cache.stat(parsed.datasetId)) {
+    try {
+      return await serverSidePage(
+        parsed.datasetId,
+        meta.columnLabels,
+        parsed.filters,
+        parsed.like,
+        limit,
+        offset,
+        "datastore_search (server-side; local ingest still in progress)",
+      );
+    } catch {
+      throw new Error(
+        `Dataset ${parsed.datasetId} is taking longer than ${INGEST_BUDGET_MS / 1000}s to ` +
+          `index locally — it's still downloading in the background. Please retry shortly.`,
+      );
+    }
+  }
 
   // 3. Build the column-label map from the dataset metadata so callers can
   //    pass either the human label or the underlying CSV header. The cache

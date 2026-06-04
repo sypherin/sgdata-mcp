@@ -115,6 +115,9 @@ export function createCrimeTools(
             datasetId: crimeEntry.datasetId,
             crime_type: p.crime_type,
             series: [],
+            available: rows
+              .map((r) => ((r.DataSeries as string | null) ?? "").trim())
+              .filter(Boolean),
           };
         const cols = extractYearCols(hit);
         const asc = sortYearsDesc(cols).reverse();

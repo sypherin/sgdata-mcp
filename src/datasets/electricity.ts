@@ -120,6 +120,9 @@ export function createElectricityTools(
             datasetId: electricityEntry.datasetId,
             source: p.source,
             series: [],
+            available: rows
+              .map((r) => ((r.DataSeries as string | null) ?? "").trim())
+              .filter(Boolean),
           };
         const cols = extractMonthCols(hit);
         const asc = sortMonthsDesc(cols).reverse();

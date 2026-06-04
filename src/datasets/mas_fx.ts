@@ -53,10 +53,28 @@ function prettyMonth(col: string): string {
   return m ? `${m[1]}-${m[2]}` : col;
 }
 
+/** ISO-4217 codes → a substring of the MAS DataSeries label, so callers can
+ *  pass the natural "USD"/"JPY"/"GBP" instead of "US Dollar"/"Japanese Yen". */
+const FX_ISO: Record<string, string> = {
+  usd: "us dollar", eur: "euro", gbp: "sterling", jpy: "japanese yen",
+  chf: "swiss franc", aud: "australian dollar", hkd: "hong kong dollar",
+  myr: "malaysian ringgit", krw: "korean won", twd: "taiwan dollar",
+  idr: "indonesian rupiah", thb: "thai baht", cny: "renminbi", rmb: "renminbi",
+  inr: "indian rupee", php: "philippine peso",
+};
+
 function matchCurrency(row: Row, needle?: string): boolean {
   if (!needle) return true;
-  const ds = (row.DataSeries as string | null) ?? "";
-  return ds.toLowerCase().includes(needle.toLowerCase());
+  const ds = ((row.DataSeries as string | null) ?? "").toLowerCase();
+  let n = needle.toLowerCase().trim();
+  if (FX_ISO[n]) n = FX_ISO[n];
+  // Space-insensitive substring so "USD" matches "US Dollar".
+  return ds.includes(n) || ds.replace(/\s+/g, "").includes(n.replace(/\s+/g, ""));
+}
+
+/** Available currency labels, for guiding a caller whose needle matched nothing. */
+function fxLabels(rows: Row[]): string[] {
+  return rows.map((r) => ((r.DataSeries as string | null) ?? "").trim()).filter(Boolean);
 }
 
 function toNumber(v: unknown): number | null {
@@ -121,7 +139,12 @@ export function createMasFxTools(
         const rows = await fetchAll();
         const hit = rows.find((r) => matchCurrency(r, p.currency));
         if (!hit) {
-          return { datasetId: masFxEntry.datasetId, currency: p.currency, rate: null };
+          return {
+            datasetId: masFxEntry.datasetId,
+            currency: p.currency,
+            rate: null,
+            available: fxLabels(rows),
+          };
         }
         let col: string | null = null;
         if (p.month) {
@@ -157,7 +180,12 @@ export function createMasFxTools(
         const rows = await fetchAll();
         const hit = rows.find((r) => matchCurrency(r, p.currency));
         if (!hit) {
-          return { datasetId: masFxEntry.datasetId, currency: p.currency, series: [] };
+          return {
+            datasetId: masFxEntry.datasetId,
+            currency: p.currency,
+            series: [],
+            available: fxLabels(rows),
+          };
         }
         const cols = extractMonthCols(hit);
         const asc = sortMonthsDesc(cols).reverse();
