@@ -31,3 +31,6 @@ export type { DatasetEntry } from "./registry.js";
 
 export { buildFreshness, parsePeriodToDate } from "./freshness.js";
 export type { DataFreshness, FreshnessLevel, PeriodKind } from "./freshness.js";
+
+export { getCatalog, searchCatalog } from "./catalog.js";
+export type { CatalogEntry } from "./catalog.js";

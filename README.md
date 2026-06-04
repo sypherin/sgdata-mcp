@@ -1,8 +1,8 @@
 # @altronis/sgdata-mcp
 
-> A Singapore government data MCP server. **74 tools, 24 curated datasets, CLI mode, data visualization, cross-dataset queries, natural language queries.**
-> Covering ACRA + HDB + URA + COE + CPI + GDP + employment + IRAS + MAS FX + MOE + ECDA + tourism + retail + population + crime + health + energy + hawkers.
-> Local SQLite cache. No API keys. Runs anywhere MCP runs.
+> A Singapore government data MCP server. **87 tools — 24 curated datasets + 7 SingStat tables + 6 live real-time feeds, CLI mode, data visualization, cross-dataset queries, natural language queries.**
+> Covering ACRA + HDB + URA + COE + CPI + GDP + employment + IRAS + MAS FX + MOE + ECDA + tourism + retail + population + crime + health + energy + hawkers + air quality + weather + carparks + live dengue.
+> No API keys. Runs anywhere MCP runs. Full write-up: https://altronis.sg/blog/sgdata-mcp
 
 [![npm version](https://img.shields.io/npm/v/@altronis/sgdata-mcp.svg)](https://www.npmjs.com/package/@altronis/sgdata-mcp)
 [![license: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
@@ -16,8 +16,28 @@ real estate, labour, prices, public services, capital flows, crime, health,
 demographics, energy, and more.
 
 It runs as a local stdio process on your machine. No hosted backend, no API
-keys, no rate limits. First-time queries fetch straight from data.gov.sg;
-repeat queries hit a local SQLite cache at `~/.sgdata-mcp/sgdata.sqlite`.
+keys. Small curated datasets cache locally at `~/.sgdata-mcp/sgdata.sqlite`;
+large datasets (ACRA, HDB resale) and real-time feeds query data.gov.sg
+server-side so they never download a whole dataset onto your disk.
+
+**v0.5.0:** 13 new tools + a smaller footprint. **Real-time feeds** — `sg_psi`
+(air quality), `sg_weather_forecast`, `sg_air_temperature`, `sg_rainfall`,
+`sg_carpark_availability`, and `sg_dengue_clusters` (live NEA clusters — current
+dengue, vs the frozen weekly-bulletin feed). **SingStat tables** —
+`sg_household_income`, `sg_wages`, `sg_deaths`, `sg_marriages`, `sg_divorces`,
+`sg_trade`, `sg_labour_force`. **`sg_search_datasets` now actually searches**
+(data.gov.sg's `q` param is a no-op upstream, so it filters a cached catalog
+locally). **ACRA + HDB-resale tools query server-side** (`datastore_search`)
+instead of ingesting the full 56 MB / 23 MB datasets — no more multi-GB local
+cache. FX tools fixed (upstream metadata endpoint 404s; they now read live data
+via `datastore_search`).
+
+> ⚠️ **`sg_acra_formations_by_ssic` is a heavy tool.** ACRA's SSIC+year filter
+> can't be pushed server-side, so it crawls 27 shards with rate-limit backoff —
+> expect ~1–3 minutes, and for older years the count is a lower bound
+> (`bounded: true`). For fast formation **counts** by SSIC use the SingStat
+> `sg_formations_history` / `sg_formations_compare` / `sg_formations_monthly`
+> tools instead.
 
 **v0.4.1:** `sg_dataset_query` no longer hangs on very large datasets
 (size-gated server-side paging via `datastore_search` + a 60s ingest guard);

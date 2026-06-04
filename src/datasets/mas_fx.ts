@@ -7,6 +7,7 @@
 
 import { z } from "zod";
 import type { DatasetCache, DatasetDownloader, DatasetEntry } from "../core/index.js";
+import { datastoreSearch } from "../core/index.js";
 import type { ToolDef } from "../tools/index.js";
 
 export const masFxEntry: DatasetEntry = {
@@ -102,26 +103,15 @@ export function createMasFxTools(
   });
 
   async function fetchAll(): Promise<Row[]> {
-    // The data.gov.sg v2 metadata endpoint started returning 404 for the
-    // MAS FX dataset (d_b2b7ffe00aaec3936ed379369fdf531b) — the underlying
-    // data is still queryable via the v1 datastore_search but the metadata
-    // probe used by ensureFresh fails. If a cache miss bubbles up here we
-    // surface a sensible error rather than crashing the caller.
-    try {
-      await downloader.ensureFresh(masFxEntry);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      // If we have ANY cached rows, use them and degrade gracefully.
-      const cached = cache.query<Row>(masFxEntry.datasetId, { limit: 1 });
-      if (cached.length === 0) {
-        throw new Error(
-          `MAS FX dataset metadata is unreachable (data.gov.sg returned 404 — ` +
-            `tracked in v0.4.0 known issues). Original: ${msg}`,
-        );
-      }
-      // else fall through and serve cached rows
-    }
-    return cache.query<Row>(masFxEntry.datasetId, { limit: 1000 });
+    // The v2 metadata endpoint 404s for the MAS FX dataset, so ensureFresh +
+    // the local-ingest path threw (the old v0.4.0 "known issue" / HTTP-500).
+    // But the data is alive on the v1 datastore_search API — query it directly
+    // (15 rows, wide format), no ingest, no broken metadata probe.
+    // (2026-06-04: fixes the FX HTTP-500.)
+    void downloader; // FX no longer ingested
+    void cache;
+    const res = await datastoreSearch<Row>(masFxEntry.datasetId, { limit: 100 });
+    return res.records;
   }
 
   return [

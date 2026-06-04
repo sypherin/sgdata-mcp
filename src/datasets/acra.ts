@@ -1,27 +1,32 @@
 /**
- * ACRA Information on Corporate Entities — sharded collection handler.
+ * ACRA Information on Corporate Entities — server-side (datastore_search) handler.
  *
  * ACRA's corporate entity registry is published on data.gov.sg as collection
  * id `2`, split across 27 CSV shards (one per first-letter-of-entity-name
  * plus an "others" bucket). Each shard is ~18 MB, total ~480 MB, ~2.0M rows.
  *
  * This module exposes the collection as a single logical dataset
- * (`acra_entities`) plus three curated tools that fan out across all shards
- * via the shared DatasetCache + DatasetDownloader.
+ * (`acra_entities`) plus three curated tools.
  *
- * Contract notes:
- *   - `DatasetDownloader.ensureFresh()` only accepts a `DatasetEntry`, not a
- *     bare shard id, so we build synthetic per-shard entries on the fly. We
- *     deliberately mark them `shardCollection: false` so the downloader
- *     treats them as single-dataset refreshes.
- *   - `DatasetCache.query()` takes `{ where, like, limit, offset }` — it is
- *     SQLite-backed and all columns are stored as TEXT, so we do string
- *     comparison for dates and coerce counts manually.
- *   - First-letter → shard mapping is not documented for most of the 27
- *     shards (only A, W, Z, X, M, K, R, G are explicitly tagged in
- *     docs/datasets.md), so any single-UEN lookup has to fan out across
- *     every shard. See TODO near `sg_acra_get_entity` for a future
- *     optimization (a UEN → shard index in the cache layer).
+ * BACKEND (2026-06 rewrite): all three tools now fetch ONLY the relevant
+ * bounded subset from data.gov.sg's server-side `datastore_search` API. They
+ * NO LONGER call `downloader.ensureFresh()` + full-table `cache.query()` (which
+ * used to ingest the whole ~56 MB / 172k-row curated dataset — or, across all
+ * 27 shards, ~480 MB — into local SQLite on every use). The `cache` /
+ * `downloader` deps are kept in the factory signature for interface
+ * compatibility but are intentionally unused.
+ *
+ *   - `sg_acra_get_entity` (by UEN)  → one exact `filters={uen}` lookup, 1 row.
+ *   - `sg_acra_search_entities`      → `q` (name) + `filters` (status) pushed
+ *     server-side; ssic_prefix / postal_code_prefix / incorporation-date window
+ *     refined client-side on the bounded subset (datastore_search has no
+ *     prefix/range ops). NOTE the legacy endpoint drops `filters` when `q` is
+ *     present, so status is ALSO refined client-side.
+ *   - `sg_acra_formations_by_ssic`   → bounded datastore_search fan-out across
+ *     all 27 shards (preserving full-alphabet coverage), newest-first via
+ *     `sort=registration_incorporation_date desc` with early-stop once the
+ *     scan passes below the requested year. SSIC prefix + year are best-effort
+ *     client-side refines. Never ingests a full shard.
  */
 
 import { z } from "zod";
@@ -30,8 +35,104 @@ import {
   type DatasetCache,
   type DatasetDownloader,
   type DatasetEntry,
+  datastoreSearch,
 } from "../core/index.js";
 import type { ToolDef } from "../tools/index.js";
+
+// ---------------------------------------------------------------------------
+// Server-side fetch (datastore_search) — NO local ingest.
+// ---------------------------------------------------------------------------
+//
+// NOTE (2026-06): the three ACRA tools used to call
+// `ensureAllAcraShardsFresh()` (downloader.ensureFresh across 27 shards) and
+// then `queryAllAcraShards()` (full-table cache.query union), ingesting the
+// ENTIRE ~56 MB / 172k-row curated dataset into local SQLite on every use.
+//
+// They now fetch only the relevant subset from data.gov.sg's server-side
+// `datastore_search` API against the SINGLE curated ACRA resource
+// (ACRA_REPRESENTATIVE_DATASET_ID — the same id verified to back the curated
+// `acra_entities` tool). We NEVER ingest the full table again. Where
+// datastore_search can't express a filter (ssic_prefix / postal_code_prefix /
+// incorporation-date window), we fetch the q/status-filtered subset (bounded
+// via limit/offset) and refine it client-side — these are best-effort.
+
+/**
+ * Single curated ACRA resource queried server-side (no shard fan-out).
+ * Resolved lazily — `ACRA_REPRESENTATIVE_DATASET_ID` / `ACRA_SHARDS` are
+ * declared further down this file, so reading them at module-init time would
+ * hit the temporal dead zone. Called only at request time.
+ */
+function acraDatastoreId(): string {
+  return ACRA_REPRESENTATIVE_DATASET_ID;
+}
+/**
+ * Per-request page size for datastore_search.
+ *
+ * VERIFIED (2026-06): unlike the narrow HDB resource, ACRA rows are 53 columns
+ * wide, so the endpoint returns 413 Payload Too Large for limit ≥ 5000 on the
+ * big shards (limit=2000 → 200, limit=5000/10000 → 413). We cap at 2000 to
+ * stay under the payload limit; offset-paging still reaches ACRA_MAX_FETCH_ROWS.
+ */
+const ACRA_PAGE_SIZE = 2000;
+/**
+ * Hard ceiling on rows pulled for one tool call. Bounds an unfiltered or
+ * weakly-filtered request so it never drags the whole 172k table down — we
+ * page with offset until the subset is exhausted OR this cap is hit.
+ */
+const ACRA_MAX_FETCH_ROWS = 50000;
+
+/**
+ * Page the curated ACRA resource via datastore_search, pushing what the
+ * endpoint supports server-side: `q` (full-text on entity name) and exact
+ * `filters` (e.g. uen, entity_status_description). Range/prefix predicates
+ * are NOT expressible here and must be refined client-side by the caller.
+ *
+ * Bounded by design:
+ *   - With a narrowing predicate (q and/or exact filters) the server returns
+ *     only that subset; we page through it up to `maxRows`.
+ *   - With no predicate we still cap at `maxRows` (never the full 172k).
+ *
+ * Returns the fetched rows, the server-reported `total` for the subset, and a
+ * `bounded` flag (true ⇒ rows is a capped slice, not the complete subset).
+ */
+async function fetchAcraSubset(
+  opts: { q?: string; filters?: Record<string, string>; maxRows?: number },
+): Promise<{ rows: Array<Record<string, unknown>>; total: number; bounded: boolean }> {
+  const maxRows = opts.maxRows ?? ACRA_MAX_FETCH_ROWS;
+  const filters =
+    opts.filters && Object.keys(opts.filters).length > 0 ? opts.filters : undefined;
+  const q = opts.q && opts.q.length > 0 ? opts.q : undefined;
+
+  const datasetId = acraDatastoreId();
+
+  // Probe the subset size first (limit=1 returns the server-side total).
+  const probe = await datastoreSearch<Record<string, unknown>>(datasetId, {
+    limit: 1,
+    q,
+    filters,
+  });
+  const total = probe.total;
+  const targetRows = Math.min(total, maxRows);
+
+  const rows: Array<Record<string, unknown>> = [];
+  let offset = 0;
+  while (rows.length < targetRows) {
+    const pageLimit = Math.min(ACRA_PAGE_SIZE, targetRows - rows.length);
+    const res = await datastoreSearch<Record<string, unknown>>(datasetId, {
+      limit: pageLimit,
+      offset,
+      q,
+      filters,
+    });
+    if (res.records.length === 0) break;
+    rows.push(...res.records);
+    offset += res.records.length;
+    if (res.records.length < pageLimit) break; // exhausted the subset
+  }
+
+  const bounded = total > rows.length;
+  return { rows, total, bounded };
+}
 
 // ---------------------------------------------------------------------------
 // Shard constants
@@ -108,84 +209,14 @@ export const acraEntries: DatasetEntry[] = [
 // ---------------------------------------------------------------------------
 // Sharding helpers
 // ---------------------------------------------------------------------------
-
-/** Build a synthetic single-dataset entry so the downloader can refresh one shard. */
-function shardEntry(shardId: string): DatasetEntry {
-  return {
-    id: `acra_entities__shard_${shardId}`,
-    datasetId: shardId,
-    shardCollection: false,
-    name: `ACRA shard ${shardId}`,
-    description: "Synthetic per-shard entry used for ad-hoc refreshes.",
-    agency: "ACRA",
-    refreshDays: 30,
-    tags: ["acra", "shard"],
-  };
-}
-
-/**
- * Ensure every ACRA shard is downloaded + fresh. Runs with a tiny
- * concurrency limit so we don't hammer data.gov.sg. Safe to call on
- * every tool invocation — the downloader's TTL check short-circuits
- * hot shards cheaply.
- */
-export async function ensureAllAcraShardsFresh(
-  downloader: DatasetDownloader,
-  log: (m: string) => void = () => {},
-): Promise<void> {
-  const queue = ACRA_SHARDS.map((s) => s.datasetId);
-  let cursor = 0;
-
-  async function worker(): Promise<void> {
-    while (cursor < queue.length) {
-      const idx = cursor++;
-      const shardId = queue[idx]!;
-      try {
-        await downloader.ensureFresh(shardEntry(shardId), log);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        log(`[acra shard ${shardId}] refresh failed: ${msg}`);
-      }
-    }
-  }
-
-  const workers: Promise<void>[] = [];
-  const n = Math.min(ACRA_FETCH_CONCURRENCY, queue.length);
-  for (let i = 0; i < n; i++) workers.push(worker());
-  await Promise.all(workers);
-}
-
-export interface QueryAllShardsOpts {
-  where?: Record<string, string | number>;
-  like?: Record<string, string>;
-  /** Optional per-shard scan cap (pre-union). Defaults to 5000. */
-  perShardLimit?: number;
-}
-
-/**
- * Run the same filter against every ACRA shard and union the rows. Caller
- * is responsible for any post-union sort + pagination — we return the raw
- * concatenated rows so count-style tools can avoid copying twice.
- */
-export function queryAllAcraShards(
-  cache: DatasetCache,
-  opts: QueryAllShardsOpts = {},
-): Array<Record<string, unknown>> {
-  const { where, like, perShardLimit = 5000 } = opts;
-  const all: Array<Record<string, unknown>> = [];
-  for (const shard of ACRA_SHARDS) {
-    const queryOpts: {
-      where?: Record<string, string | number>;
-      like?: Record<string, string>;
-      limit: number;
-    } = { limit: perShardLimit };
-    if (where) queryOpts.where = where;
-    if (like) queryOpts.like = like;
-    const rows = cache.query<Record<string, unknown>>(shard.datasetId, queryOpts);
-    for (const r of rows) all.push(r);
-  }
-  return all;
-}
+//
+// NOTE (2026-06): the old `shardEntry` / `ensureAllAcraShardsFresh` /
+// `queryAllAcraShards` helpers were REMOVED. They drove the full-table local
+// ingest (downloader.ensureFresh across 27 shards + cache.query union) that
+// this rewrite eliminates. All three ACRA tools now fetch only the relevant
+// bounded subset via server-side datastore_search — we never ingest the full
+// table again. Per-shard fan-out for `sg_acra_formations_by_ssic` lives in
+// `scanShardForFormations` (datastore_search, bounded, no ingest).
 
 // ---------------------------------------------------------------------------
 // Row helpers
@@ -268,52 +299,84 @@ interface AcraSearchOutput {
 }
 
 async function handleAcraSearch(
-  cache: DatasetCache,
-  downloader: DatasetDownloader,
+  _cache: DatasetCache,
+  _downloader: DatasetDownloader,
   rawInput: unknown,
 ): Promise<AcraSearchOutput> {
+  // cache + downloader intentionally unused: served via server-side
+  // datastore_search, never ingested locally.
+  void _cache;
+  void _downloader;
+
   const input = AcraSearchInput.parse(rawInput);
   const limit = input.limit ?? 50;
   const offset = input.offset ?? 0;
 
-  await ensureAllAcraShardsFresh(downloader);
+  // Push what datastore_search supports server-side:
+  //   - `query`  → full-text `q` on entity name.
+  //   - `status` → exact `filters.entity_status_description`.
+  // `ssic_prefix`, `postal_code_prefix`, and the incorporation-date window
+  // CANNOT be expressed server-side (datastore_search has no prefix/range
+  // operators), so they are applied client-side as a BEST-EFFORT refine on
+  // the q/status-filtered subset (bounded — see fetchAcraSubset).
+  //
+  // QUIRK (verified 2026-06): the legacy datastore_search SILENTLY IGNORES
+  // `filters` when `q` is also present (q wins; `q=ANG&filters={status:X}`
+  // returns the same total for ANY X). So when BOTH query and status are
+  // supplied, the server-side status filter is a no-op — we therefore ALSO
+  // refine status client-side below so the result is correct either way.
+  const filters: Record<string, string> = {};
+  if (input.status) filters["entity_status_description"] = input.status;
 
-  // Push whatever we can down into SQLite via cache.query. Status is an
-  // exact match; the rest are LIKE filters against TEXT columns.
-  const where: Record<string, string | number> = {};
-  const like: Record<string, string> = {};
-
-  if (input.status) where["entity_status_description"] = input.status;
-  if (input.query) like["entity_name"] = `%${input.query}%`;
-  if (input.ssic_prefix) like["primary_ssic_code"] = `${input.ssic_prefix}%`;
-  if (input.postal_code_prefix) {
-    like["postal_code"] = `${input.postal_code_prefix}%`;
+  let subsetRows: Array<Record<string, unknown>>;
+  try {
+    const opts: { q?: string; filters?: Record<string, string> } = {};
+    if (input.query) opts.q = input.query;
+    if (Object.keys(filters).length > 0) opts.filters = filters;
+    const res = await fetchAcraSubset(opts);
+    subsetRows = res.rows;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // Graceful error — NEVER fall back to full local ingest.
+    throw new Error(`datastore_search failed for ACRA search: ${message}`);
   }
 
-  const unioned = queryAllAcraShards(cache, {
-    where: Object.keys(where).length > 0 ? where : undefined,
-    like: Object.keys(like).length > 0 ? like : undefined,
-    perShardLimit: 5000,
-  });
-
-  // Date filters have to happen in JS — the column is TEXT but stored as
-  // ISO-ish "YYYY-MM-DD" so lexicographic compare works.
+  // Client-side best-effort refinement for the predicates datastore_search
+  // can't do: SSIC prefix, postal-code prefix, and the incorporation-date
+  // window (dates are ISO "YYYY-MM-DD" → lexicographic compare is safe).
   const after = input.incorporated_after;
   const before = input.incorporated_before;
-  const dateFiltered = unioned.filter((row) => {
-    if (!after && !before) return true;
-    const d = incorporationDate(row);
-    if (!d) return false;
-    if (after && d < after) return false;
-    if (before && d > before) return false;
+  // Re-apply status client-side too: the server drops the status filter when a
+  // `q` is present (see QUIRK above), so without this a name+status search
+  // would silently ignore `status`. Exact match on entity_status_description.
+  const wantStatus = input.status;
+  const refined = subsetRows.filter((row) => {
+    if (wantStatus && entityStatus(row) !== wantStatus) {
+      return false;
+    }
+    if (input.ssic_prefix && !primarySsic(row).startsWith(input.ssic_prefix)) {
+      return false;
+    }
+    if (
+      input.postal_code_prefix &&
+      !postalCode(row).startsWith(input.postal_code_prefix)
+    ) {
+      return false;
+    }
+    if (after || before) {
+      const d = incorporationDate(row);
+      if (!d) return false;
+      if (after && d < after) return false;
+      if (before && d > before) return false;
+    }
     return true;
   });
 
-  // Sort by entity_name for stable pagination across shards.
-  dateFiltered.sort((a, b) => entityName(a).localeCompare(entityName(b)));
+  // Sort by entity_name for stable pagination.
+  refined.sort((a, b) => entityName(a).localeCompare(entityName(b)));
 
-  const total = dateFiltered.length;
-  const page = dateFiltered.slice(offset, offset + limit);
+  const total = refined.length;
+  const page = refined.slice(offset, offset + limit);
 
   return {
     total,
@@ -342,34 +405,40 @@ interface AcraGetEntityOutput {
 }
 
 async function handleAcraGetEntity(
-  cache: DatasetCache,
-  downloader: DatasetDownloader,
+  _cache: DatasetCache,
+  _downloader: DatasetDownloader,
   rawInput: unknown,
 ): Promise<AcraGetEntityOutput> {
+  // cache + downloader intentionally unused: served via server-side
+  // datastore_search, never ingested locally.
+  void _cache;
+  void _downloader;
+
   const { uen: targetUen } = AcraGetEntityInput.parse(rawInput);
 
-  // TODO(perf): build a UEN → shard index in the cache layer so we can
-  // skip 26 of the 27 shards on single-entity lookups. Today we fan out
-  // across all shards because we don't know an entity's first-letter
-  // from its UEN alone.
-  await ensureAllAcraShardsFresh(downloader);
-
-  for (const shard of ACRA_SHARDS) {
-    const rows = cache.query<Record<string, unknown>>(shard.datasetId, {
-      where: { uen: targetUen },
+  // Single exact-match server-side lookup — returns at most the 1 matching
+  // row, no shard fan-out, no local ingest.
+  try {
+    const res = await datastoreSearch<Record<string, unknown>>(acraDatastoreId(), {
       limit: 1,
+      filters: { uen: targetUen },
     });
-    if (rows.length > 0) {
+    if (res.records.length > 0) {
       return {
         found: true,
         uen: targetUen,
-        entity: rows[0]!,
-        shardDatasetId: shard.datasetId,
+        entity: res.records[0]!,
+        // Keep the field for output-shape compatibility; with the curated
+        // single-resource backend the shard IS the datastore resource.
+        shardDatasetId: acraDatastoreId(),
       };
     }
+    return { found: false, uen: targetUen };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // Graceful error — NEVER fall back to full local ingest.
+    throw new Error(`datastore_search failed for ACRA get_entity: ${message}`);
   }
-
-  return { found: false, uen: targetUen };
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +461,11 @@ interface AcraFormationsOutput {
   ssic_prefix: string;
   year: number;
   count: number;
+  /**
+   * true ⇒ at least one shard exceeded the per-shard scan cap so its rows were
+   * sampled (bounded), not fully scanned — `count` is then a LOWER BOUND.
+   */
+  bounded: boolean;
   sample: Array<{
     uen: string;
     entity_name: string;
@@ -401,41 +475,190 @@ interface AcraFormationsOutput {
   }>;
 }
 
+/**
+ * Direct datastore_search call that supports the `sort` param.
+ *
+ * The shared `datastoreSearch` helper in core deliberately doesn't expose
+ * `sort`, but the legacy endpoint DOES honour it (verified:
+ * `sort=registration_incorporation_date desc` returns newest-first). We need
+ * that for the formations scan (see scanShardForFormations), so we hit the
+ * endpoint directly here. Still server-side / paged — NO local ingest.
+ */
+async function datastoreSearchSorted(
+  resourceId: string,
+  params: { limit: number; offset: number; sort: string },
+): Promise<{ records: Array<Record<string, unknown>>; total: number }> {
+  const qs = new URLSearchParams({
+    resource_id: resourceId,
+    limit: String(params.limit),
+    offset: String(params.offset),
+    sort: params.sort,
+  });
+  const url = `https://data.gov.sg/api/action/datastore_search?${qs}`;
+  // data.gov.sg rate-limits datastore_search; the 27-shard formations fan-out
+  // trips HTTP 429 easily. Retry with exponential backoff so the (intentionally
+  // heavy/slow) formations tool crawls through instead of failing outright.
+  const MAX_RETRIES = 5;
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(url, {
+      headers: { "User-Agent": "sgdata-mcp/0.1 (+https://altronis.sg)" },
+    });
+    if (res.status === 429 && attempt < MAX_RETRIES) {
+      await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt)); // 1,2,4,8,16s
+      continue;
+    }
+    if (!res.ok) {
+      throw new Error(`datastore_search ${res.status} ${res.statusText} — ${url}`);
+    }
+    const json = (await res.json()) as {
+      success?: boolean;
+      result?: { records?: Array<Record<string, unknown>>; total?: number };
+    };
+    if (!json.success) throw new Error(`datastore_search failed: ${url}`);
+    return {
+      records: json.result?.records ?? [],
+      total: json.result?.total ?? 0,
+    };
+  }
+}
+
+/**
+ * Scan ONE ACRA shard for SSIC-prefix + year formations via server-side
+ * datastore_search, newest-first, refining client-side. NO local ingest.
+ *
+ * Why this shape (best-effort / bounded — all three constraints are real):
+ *   1. SSIC PREFIX can't be pushed server-side. datastore_search `filters` are
+ *      EXACT-match only (no prefix op — `filters.primary_ssic_code="62"` matches
+ *      literally "62", not "62010"), and full-text `q` does NOT index the
+ *      numeric `primary_ssic_code` (verified: `q=62010` → 0 hits). So SSIC
+ *      prefix is refined in JS.
+ *   2. YEAR can't be pushed server-side either (no range/prefix op on the date).
+ *      BUT the endpoint honours `sort` (verified), so we page newest-first by
+ *      `registration_incorporation_date desc` and STOP as soon as a page drops
+ *      below the target year — this makes a recent-year query bounded (it never
+ *      reads the whole shard) and CORRECT (it sees every row in that year), far
+ *      better than a natural-order scan which is unordered by date and misses
+ *      almost all matches.
+ *   3. HARD CAP. As a backstop against a very old `year` (which would force a
+ *      deep scan), we also cap each shard at `maxRowsPerShard`. If we hit that
+ *      cap before reaching the year, `truncated=true` and the aggregate count
+ *      becomes a LOWER BOUND (surfaced via `bounded`).
+ */
+async function scanShardForFormations(
+  shardId: string,
+  ssicPrefix: string,
+  yearStr: string,
+  maxRowsPerShard: number,
+): Promise<{ matches: Array<Record<string, unknown>>; scanned: number; total: number; truncated: boolean }> {
+  const matches: Array<Record<string, unknown>> = [];
+  let offset = 0;
+  let scanned = 0;
+  let total = 0;
+  let reachedYear = false; // we paged down past the target year (complete for this shard)
+  while (scanned < maxRowsPerShard) {
+    const pageLimit = Math.min(ACRA_PAGE_SIZE, maxRowsPerShard - scanned);
+    const res = await datastoreSearchSorted(shardId, {
+      limit: pageLimit,
+      offset,
+      sort: "registration_incorporation_date desc",
+    });
+    total = res.total;
+    if (res.records.length === 0) break;
+    let crossedBelow = false;
+    for (const row of res.records) {
+      const date = incorporationDate(row);
+      const rowYear = date.slice(0, 4);
+      // Sorted newest-first: once a row's year is below the target, every
+      // remaining row is older too — we've seen the whole target year.
+      if (rowYear && rowYear < yearStr) {
+        crossedBelow = true;
+        break;
+      }
+      if (date.startsWith(`${yearStr}-`) && primarySsic(row).startsWith(ssicPrefix)) {
+        matches.push(row);
+      }
+    }
+    scanned += res.records.length;
+    offset += res.records.length;
+    if (crossedBelow) {
+      reachedYear = true;
+      break;
+    }
+    if (res.records.length < pageLimit) break; // exhausted this shard
+  }
+  // truncated = we stopped on the hard cap WITHOUT confirming we passed the
+  // target year (and didn't simply exhaust the shard) ⇒ count is a lower bound.
+  const truncated = !reachedYear && scanned < total;
+  return { matches, scanned, total, truncated };
+}
+
+// `sg_acra_formations_by_ssic` is FAST-BOUNDED (2026-06-04): the SSIC+year
+// filter can't be pushed server-side, so an uncapped 27-shard scan took ~280s
+// and timed out clients. We cap each shard to a few recent pages and
+// parallelise harder → returns in ~15-30s. For an OLDER year the newest-first
+// scan may not reach it within the cap ⇒ `bounded:true` (count is a LOWER
+// bound; use the fast SingStat `sg_formations_*` tools for exact counts).
+const FORMATIONS_MAX_ROWS_PER_SHARD = 4000; // 2 pages of ACRA_PAGE_SIZE
+// Gentle on data.gov.sg's rate limiter (concurrency 6 instant-429'd); with
+// 429 backoff in datastoreSearchSorted this crawls the 27 shards reliably but
+// slowly (~1-3 min). It's documented as a "heavy" tool in the README.
+const FORMATIONS_CONCURRENCY = 2;
+
 async function handleAcraFormations(
-  cache: DatasetCache,
-  downloader: DatasetDownloader,
+  _cache: DatasetCache,
+  _downloader: DatasetDownloader,
   rawInput: unknown,
 ): Promise<AcraFormationsOutput> {
+  // cache + downloader intentionally unused: served via server-side
+  // datastore_search across the shard resources, never ingested locally.
+  void _cache;
+  void _downloader;
+
   const input = AcraFormationsInput.parse(rawInput);
   const yearNum = typeof input.year === "number" ? input.year : Number(input.year);
   const yearStr = String(yearNum);
 
-  await ensureAllAcraShardsFresh(downloader);
+  // Fan out datastore_search across all 27 shard resources (preserving the
+  // old tool's full-alphabet coverage) WITHOUT any local ingest. Each shard
+  // is paged + refined client-side for SSIC-prefix + year (see
+  // scanShardForFormations for why this can't be pushed server-side). The
+  // per-shard scan is bounded by ACRA_MAX_FETCH_ROWS so a huge shard can't
+  // drag its whole table down — for such shards the count is a LOWER BOUND.
+  const queue = ACRA_SHARDS.map((s) => s.datasetId);
+  let cursor = 0;
+  const allMatches: Array<Record<string, unknown>> = [];
+  let anyTruncated = false;
 
-  // Filter at the SQL layer where possible: SSIC prefix via LIKE, year via
-  // LIKE on the date string ("YYYY-..."). Sharp enough that per-shard row
-  // counts stay bounded.
-  const unioned = queryAllAcraShards(cache, {
-    like: {
-      primary_ssic_code: `${input.ssic_prefix}%`,
-      registration_incorporation_date: `${yearStr}-%`,
-    },
-    perShardLimit: 20000,
-  });
+  try {
+    async function worker(): Promise<void> {
+      while (cursor < queue.length) {
+        const idx = cursor++;
+        const shardId = queue[idx]!;
+        const { matches, truncated } = await scanShardForFormations(
+          shardId,
+          input.ssic_prefix,
+          yearStr,
+          FORMATIONS_MAX_ROWS_PER_SHARD,
+        );
+        if (truncated) anyTruncated = true;
+        for (const m of matches) allMatches.push(m);
+      }
+    }
+    const workers: Promise<void>[] = [];
+    const n = Math.min(FORMATIONS_CONCURRENCY, queue.length);
+    for (let i = 0; i < n; i++) workers.push(worker());
+    await Promise.all(workers);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // Graceful error — NEVER fall back to full local ingest.
+    throw new Error(`datastore_search failed for ACRA formations: ${message}`);
+  }
 
-  // Belt-and-braces JS filter in case the cache column got sanitized to a
-  // slightly different key and the LIKE didn't match.
-  const matches = unioned.filter((row) => {
-    const ssic = primarySsic(row);
-    const date = incorporationDate(row);
-    return ssic.startsWith(input.ssic_prefix) && date.startsWith(`${yearStr}-`);
-  });
-
-  matches.sort((a, b) =>
+  allMatches.sort((a, b) =>
     incorporationDate(a).localeCompare(incorporationDate(b)),
   );
 
-  const sample = matches.slice(0, 25).map((row) => ({
+  const sample = allMatches.slice(0, 25).map((row) => ({
     uen: uen(row),
     entity_name: entityName(row),
     primary_ssic_code: primarySsic(row),
@@ -446,10 +669,14 @@ async function handleAcraFormations(
   // silence unused warning for postalCode helper (kept for future filters)
   void postalCode;
 
+  // NOTE: `count` is over the bounded per-shard scans. `bounded: true` means at
+  // least one shard exceeded ACRA_MAX_FETCH_ROWS so its rows were sampled, not
+  // fully scanned — the count is then a LOWER BOUND on the true formation total.
   return {
     ssic_prefix: input.ssic_prefix,
     year: yearNum,
-    count: matches.length,
+    count: allMatches.length,
+    bounded: anyTruncated,
     sample,
   };
 }
@@ -466,22 +693,23 @@ export function createAcraTools(
     {
       name: "sg_acra_search_entities",
       description:
-        "Search the full ACRA corporate registry across all 27 alphabetic " +
-        "shards. Filters: free-text substring on entity_name (`query`), " +
-        "SSIC prefix (`ssic_prefix`, e.g. '62' for IT), exact entity status " +
-        "(`status`, e.g. 'Live Company'), incorporation date window " +
-        "(`incorporated_after` / `incorporated_before`, YYYY-MM-DD), and " +
-        "postal code prefix (`postal_code_prefix`). Results are unioned " +
-        "across shards, sorted by entity_name, and paginated via limit/offset.",
+        "Search the curated ACRA corporate registry resource server-side " +
+        "(via datastore_search; no local ingest). Filters: free-text substring " +
+        "on entity_name (`query`), SSIC prefix (`ssic_prefix`, e.g. '62' for " +
+        "IT), exact entity status (`status`, e.g. 'Live Company'), " +
+        "incorporation date window (`incorporated_after` / " +
+        "`incorporated_before`, YYYY-MM-DD), and postal code prefix " +
+        "(`postal_code_prefix`). query+status are pushed server-side; SSIC/" +
+        "postal/date predicates are refined client-side on the bounded fetched " +
+        "subset. Sorted by entity_name, paginated via limit/offset.",
       inputSchema: AcraSearchInput,
       handler: (input: unknown) => handleAcraSearch(cache, downloader, input),
     },
     {
       name: "sg_acra_get_entity",
       description:
-        "Look up a single ACRA corporate entity by exact UEN. Fans out " +
-        "across all 27 shards because UEN → shard mapping is not known " +
-        "upfront (future optimization: cache a UEN index). Returns the " +
+        "Look up a single ACRA corporate entity by exact UEN via a server-side " +
+        "datastore_search exact-match query (no local ingest). Returns the " +
         "full row including entity name, type, status, SSIC, and address, " +
         "or `found: false` if no match.",
       inputSchema: AcraGetEntityInput,
@@ -513,17 +741,17 @@ export const acraTools: ToolDef[] = [
   {
     name: "sg_acra_search_entities",
     description:
-      "Search the full ACRA corporate registry across all 27 alphabetic " +
-      "shards (entity name substring, SSIC prefix, status, incorporation " +
-      "date window, postal code prefix).",
+      "Search the curated ACRA corporate registry resource server-side via " +
+      "datastore_search (entity name substring, SSIC prefix, status, " +
+      "incorporation date window, postal code prefix).",
     inputSchema: AcraSearchInput,
     handler: notWired("sg_acra_search_entities"),
   },
   {
     name: "sg_acra_get_entity",
     description:
-      "Look up a single ACRA corporate entity by exact UEN. Fans out " +
-      "across all 27 shards.",
+      "Look up a single ACRA corporate entity by exact UEN via a server-side " +
+      "datastore_search exact-match query (no local ingest).",
     inputSchema: AcraGetEntityInput,
     handler: notWired("sg_acra_get_entity"),
   },

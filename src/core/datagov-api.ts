@@ -81,7 +81,11 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: {
       Accept: "application/json",
-      "Content-Type": "application/json",
+      // Only send Content-Type when there's a request body. data.gov.sg's
+      // datastore_search (a bodyless GET) returns HTTP 422 — "Content type
+      // defined as JSON but an invalid JSON was provided" — if we send it,
+      // which broke every server-side acra/hdb_resale query (2026-06-04).
+      ...(init?.body ? { "Content-Type": "application/json" } : {}),
       "User-Agent": USER_AGENT,
       ...(init?.headers ?? {}),
     },

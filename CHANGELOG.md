@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.5.0 — 2026-06-04
+
+### New tools (13)
+
+- **Real-time feeds** (new `api.data.gov.sg/v1` layer — live JSON, no download):
+  `sg_psi` (air quality / PM2.5), `sg_weather_forecast` (2h + 24h),
+  `sg_air_temperature`, `sg_rainfall`, `sg_carpark_availability` (live lots),
+  and `sg_dengue_clusters` (live NEA clusters — current dengue, vs the frozen
+  weekly bulletin).
+- **SingStat tables**: `sg_household_income`, `sg_wages`, `sg_deaths`,
+  `sg_marriages`, `sg_divorces`, `sg_trade`, `sg_labour_force`.
+
+### Fixes
+
+- **`sg_search_datasets` was broken** — data.gov.sg's `/datasets?q=` endpoint
+  ignores the query, so it returned the same default list for every search. It
+  now caches the full dataset catalog (metadata only, ~4.4k datasets, 24h TTL)
+  and does real keyword scoring locally.
+- **No more multi-GB local cache.** `acra_*` and `hdb_resale_*` tools used to
+  download + ingest the entire 56 MB / 23 MB dataset into local SQLite on every
+  use. They now query `datastore_search` server-side and fetch only the matching
+  subset (e.g. a town filter pulls ~12k rows, not 232k) — zero local ingest.
+- **FX tools fixed** (`sg_fx_rate` / `sg_fx_history` / `sg_fx_basket`). The MAS
+  FX dataset's metadata endpoint 404s upstream (the old HTTP-500); they now read
+  the live data via `datastore_search`.
+- Fixed an HTTP-422 in the shared fetch helper — it sent `Content-Type: json`
+  on bodyless GETs, which `datastore_search` rejects (broke every server-side
+  acra/hdb query until caught in QC).
+
+### Notes
+
+- **`sg_acra_formations_by_ssic` is a heavy tool** (~1–3 min). ACRA's SSIC+year
+  filter can't be pushed server-side, so it crawls 27 shards with 429 backoff;
+  older years return a lower-bound count (`bounded: true`). Use the SingStat
+  `sg_formations_*` tools for fast counts.
+
 ## 0.4.1 — 2026-06-04
 
 ### Bug fixes

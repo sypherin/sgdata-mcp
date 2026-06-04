@@ -21,29 +21,16 @@ import type {
   DatasetDownloader,
   DatasetEntry,
 } from "../core/index.js";
-import { getDatasetMetadata, datastoreSearch } from "../core/index.js";
+import {
+  getDatasetMetadata,
+  datastoreSearch,
+  getCatalog,
+  searchCatalog,
+} from "../core/index.js";
 
 // ---------------------------------------------------------------------------
-// Shared HTTP helper. We use globalThis fetch (Node 20+) — no axios.
+// Shared helper.
 // ---------------------------------------------------------------------------
-
-const DATAGOV_BASE = "https://api-production.data.gov.sg/v2/public/api";
-const USER_AGENT = "sgdata-mcp/0.1 (+https://altronis.sg)";
-
-async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url, {
-    headers: {
-      Accept: "application/json",
-      "User-Agent": USER_AGENT,
-    },
-  });
-  if (!res.ok) {
-    throw new Error(
-      `data.gov.sg request failed: ${res.status} ${res.statusText} — ${url}`,
-    );
-  }
-  return (await res.json()) as T;
-}
 
 function truncate(text: string | undefined, max = 300): string {
   if (!text) return "";
@@ -65,25 +52,6 @@ export const SearchDatasetsInput = z.object({
 
 export type SearchDatasetsInput = z.infer<typeof SearchDatasetsInput>;
 
-interface RawDatasetSearchHit {
-  datasetId?: string;
-  name?: string;
-  description?: string;
-  managedByAgencyName?: string;
-  format?: string;
-  lastUpdatedAt?: string;
-  rowCount?: number;
-  sizeBytes?: number;
-}
-
-interface RawDatasetSearchResponse {
-  data?: {
-    datasets?: RawDatasetSearchHit[];
-    // Some variants of the search endpoint nest results under `results`.
-    results?: RawDatasetSearchHit[];
-  };
-}
-
 export interface SearchDatasetsOutput {
   count: number;
   datasets: Array<{
@@ -104,48 +72,29 @@ export async function sgSearchDatasets(
   const parsed = SearchDatasetsInput.parse(input);
   const limit = parsed.limit ?? 10;
 
-  const qs = new URLSearchParams({ q: parsed.query });
-  // Ask the upstream for a generous page so post-filtering still gives us
-  // `limit` after agency/format trimming.
-  qs.set("page", "1");
-  qs.set("size", String(Math.max(limit * 3, 30)));
+  // data.gov.sg's `/datasets?q=` endpoint ignores the query param entirely, so
+  // hitting it directly returns the same default list for every search. Instead
+  // we pull the full catalog (cached locally, 24h TTL) and run real keyword
+  // scoring (name weighted 3x vs description) over it. See src/core/catalog.ts.
+  const catalog = await getCatalog();
+  const hits = searchCatalog(catalog, parsed.query, {
+    limit,
+    agency: parsed.agency,
+    format: parsed.format,
+  });
 
-  const url = `${DATAGOV_BASE}/datasets?${qs.toString()}`;
-  const json = await fetchJson<RawDatasetSearchResponse>(url);
-  const rawHits =
-    json.data?.datasets ?? json.data?.results ?? ([] as RawDatasetSearchHit[]);
-
-  const agencyNeedle = parsed.agency?.toLowerCase();
-  const formatFilter = parsed.format;
-
-  const filtered: SearchDatasetsOutput["datasets"] = [];
-  for (const hit of rawHits) {
-    if (!hit.datasetId) continue;
-    if (
-      agencyNeedle &&
-      !(hit.managedByAgencyName ?? "").toLowerCase().includes(agencyNeedle)
-    ) {
-      continue;
-    }
-    if (formatFilter && (hit.format ?? "").toUpperCase() !== formatFilter) {
-      continue;
-    }
-    filtered.push({
-      datasetId: hit.datasetId,
-      name: hit.name ?? "(unnamed dataset)",
-      description: truncate(hit.description, 300),
-      agency: hit.managedByAgencyName ?? "",
-      format: hit.format ?? "",
-      lastUpdatedAt: hit.lastUpdatedAt ?? "",
-      ...(hit.rowCount != null ? { rowCount: hit.rowCount } : {}),
-      ...(hit.sizeBytes != null ? { sizeBytes: hit.sizeBytes } : {}),
-    });
-    if (filtered.length >= limit) break;
-  }
+  const datasets: SearchDatasetsOutput["datasets"] = hits.map((hit) => ({
+    datasetId: hit.datasetId,
+    name: hit.name || "(unnamed dataset)",
+    description: truncate(hit.description, 300),
+    agency: hit.agency,
+    format: hit.format,
+    lastUpdatedAt: hit.lastUpdatedAt,
+  }));
 
   return {
-    count: filtered.length,
-    datasets: filtered,
+    count: datasets.length,
+    datasets,
   };
 }
 

@@ -20,13 +20,21 @@ import type { ToolDef } from "../tools/index.js";
 
 import { acraEntries, createAcraTools } from "./acra.js";
 import { allCuratedEntries, createAllCuratedTools } from "./non-acra.js";
+import { createRealtimeTools } from "./realtime.js";
+import {
+  singstatExtraEntries,
+  createSingstatExtraTools,
+} from "./singstat_extra.js";
 
 export * from "./acra.js";
 export * from "./non-acra.js";
+export * from "./realtime.js";
+export * from "./singstat_extra.js";
 
-/** Every curated DatasetEntry across ACRA + the 14 non-ACRA datasets. */
+/** Every curated DatasetEntry across ACRA, the non-ACRA datasets, and the
+ *  extra SingStat tables. (Real-time tools hit live APIs — no registry rows.) */
 export function allDatasetEntries(): DatasetEntry[] {
-  return [...acraEntries, ...allCuratedEntries()];
+  return [...acraEntries, ...allCuratedEntries(), ...singstatExtraEntries];
 }
 
 /** Every curated ToolDef, with cache + downloader injected. */
@@ -37,5 +45,7 @@ export function createAllDatasetTools(
   return [
     ...createAcraTools(cache, downloader),
     ...createAllCuratedTools(cache, downloader),
+    ...createSingstatExtraTools(cache, downloader),
+    ...createRealtimeTools(cache, downloader),
   ];
 }
