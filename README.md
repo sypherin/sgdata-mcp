@@ -19,6 +19,13 @@ It runs as a local stdio process on your machine. No hosted backend, no API
 keys, no rate limits. First-time queries fetch straight from data.gov.sg;
 repeat queries hit a local SQLite cache at `~/.sgdata-mcp/sgdata.sqlite`.
 
+**v0.4.1:** `sg_dataset_query` no longer hangs on very large datasets
+(size-gated server-side paging via `datastore_search` + a 60s ingest guard);
+`sg_fx_rate` / `sg_fx_history` now accept ISO currency codes (`USD`, `GBP`,
+`JPY`, `EUR`, …); `sg_tourism_latest` now emits `data_freshness` (its upstream
+stops at 2014); and the `_history` tools return an `available` label list on a
+no-match so callers can self-correct.
+
 **v0.4.0 highlights:** `data_freshness` metadata block emitted on every
 `_latest` tool — `last_period`, `last_record_date`, `age_days`, and a
 categorical `level` of `fresh` / `ok` / `stale` / `frozen` so agents can
@@ -58,11 +65,12 @@ block so you can detect drift programmatically:
 }
 ```
 
-**Known frozen datasets (as of v0.4.0):**
+**Known frozen datasets (as of v0.4.1):**
 
 | Tool | Upstream dataset | Last update | Recommended action |
 |---|---|---|---|
 | `sg_disease_latest`, `sg_disease_trend`, `sg_disease_list` | MOH Weekly Infectious Disease Bulletin | 2022-W52 | Cross-check `moh.gov.sg` weekly bulletin PDFs. PRs welcome to swap in a live source. |
+| `sg_tourism_latest`, `sg_tourism_history` | STB Annual Tourism Receipts | 2014 | Cross-check `stb.gov.sg` / SingStat for newer receipts. PRs welcome. |
 
 If you find another upstream feed has gone silent, please open an issue —
 we'll add it to this table and surface the warning in the tool description.
