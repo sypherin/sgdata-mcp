@@ -18,6 +18,7 @@
  */
 
 import { mkdirSync } from "node:fs";
+import { VERSION } from "./version.js";
 import { homedir } from "node:os";
 import path from "node:path";
 
@@ -128,7 +129,7 @@ async function main(): Promise<void> {
   const server = new Server(
     {
       name: "sgdata-mcp",
-      version: "0.4.0",
+      version: VERSION,
     },
     {
       capabilities: {
