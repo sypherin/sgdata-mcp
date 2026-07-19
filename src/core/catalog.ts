@@ -46,15 +46,56 @@ function toEntry(d: RawHit): CatalogEntry {
   };
 }
 
+/**
+ * Fetch one catalog page. CRITICAL: distinguish "page returned no data" (a
+ * legitimate empty page — returned normally) from "page fetch FAILED" (HTTP
+ * error / network error). fetch() does NOT throw on 5xx/429, so the old
+ * `if (!r.ok) return {entries:[], pages:1}` silently turned an upstream failure
+ * into an EMPTY catalog — `sg_search_datasets` then reported `count:0` as if no
+ * dataset matched (and a partial mid-pagination failure silently dropped ~10
+ * datasets per failed page). We now retry transient failures (429/5xx) with
+ * backoff and THROW on persistent failure, so the build fails loud rather than
+ * caching/serving a known-incomplete catalog for 24h.
+ */
 async function fetchPage(page: number): Promise<{ entries: CatalogEntry[]; pages: number }> {
-  const r = await fetch(`${DATAGOV_BASE}/datasets?page=${page}`);
-  if (!r.ok) return { entries: [], pages: 1 };
-  const j = (await r.json()) as { data?: { datasets?: RawHit[]; pages?: number } };
-  const ds = j?.data?.datasets ?? [];
-  return { entries: ds.map(toEntry).filter((e) => e.datasetId), pages: j?.data?.pages ?? 1 };
+  const MAX_RETRIES = 4;
+  for (let attempt = 0; ; attempt++) {
+    let r: Response;
+    try {
+      r = await fetch(`${DATAGOV_BASE}/datasets?page=${page}`);
+    } catch (err) {
+      // Network-level failure (DNS, reset, etc.) — fetch rejected.
+      if (attempt < MAX_RETRIES) {
+        await new Promise((res) => setTimeout(res, 500 * 2 ** attempt));
+        continue;
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`catalog page ${page} fetch failed: ${msg}`);
+    }
+    if (r.ok) {
+      const j = (await r.json()) as { data?: { datasets?: RawHit[]; pages?: number } };
+      const ds = j?.data?.datasets ?? [];
+      return { entries: ds.map(toEntry).filter((e) => e.datasetId), pages: j?.data?.pages ?? 1 };
+    }
+    // Non-2xx. Retry transient rate-limit / server errors; fail loud otherwise.
+    const transient = r.status === 429 || r.status >= 500;
+    if (transient && attempt < MAX_RETRIES) {
+      await new Promise((res) => setTimeout(res, 500 * 2 ** attempt));
+      continue;
+    }
+    throw new Error(`catalog page ${page} fetch failed: HTTP ${r.status} ${r.statusText}`);
+  }
 }
 
-/** Fetch every page of the catalog (bounded concurrency) and cache it. */
+/**
+ * Fetch every page of the catalog (bounded concurrency) and cache it.
+ *
+ * Fail-loud: fetchPage now THROWS on a persistent page fetch failure, so any
+ * failed page (page 1 or a mid-pagination page) rejects the Promise.all below
+ * and propagates out of buildCatalog BEFORE the cache write — we never persist
+ * or return a silently-truncated catalog. The caller surfaces the error instead
+ * of a misleading empty/short result.
+ */
 export async function buildCatalog(): Promise<CatalogEntry[]> {
   const first = await fetchPage(1);
   const pages = first.pages;

@@ -16,12 +16,16 @@
  * `downloader` deps are kept in the factory signature for interface
  * compatibility but are intentionally unused.
  *
- *   - `sg_acra_get_entity` (by UEN)  → one exact `filters={uen}` lookup, 1 row.
+ *   - `sg_acra_get_entity` (by UEN)  → exact `filters={uen}` lookup (1 row max
+ *     per shard) FANNED OUT across all 27 shards with bounded concurrency,
+ *     early-stop on first hit (UEN is unique). A UEN can begin with any letter,
+ *     so a single-shard lookup misses ~26/27 of the registry.
  *   - `sg_acra_search_entities`      → `q` (name) + `filters` (status) pushed
- *     server-side; ssic_prefix / postal_code_prefix / incorporation-date window
- *     refined client-side on the bounded subset (datastore_search has no
- *     prefix/range ops). NOTE the legacy endpoint drops `filters` when `q` is
- *     present, so status is ALSO refined client-side.
+ *     server-side, FANNED OUT across all 27 shards (entities are sharded by
+ *     first-letter-of-name); ssic_prefix / postal_code_prefix /
+ *     incorporation-date window refined client-side on the bounded subset
+ *     (datastore_search has no prefix/range ops). NOTE the legacy endpoint
+ *     drops `filters` when `q` is present, so status is ALSO refined client-side.
  *   - `sg_acra_formations_by_ssic`   → bounded datastore_search fan-out across
  *     all 27 shards (preserving full-alphabet coverage), newest-first via
  *     `sort=registration_incorporation_date desc` with early-stop once the
@@ -46,24 +50,44 @@ import type { ToolDef } from "../tools/index.js";
 // NOTE (2026-06): the three ACRA tools used to call
 // `ensureAllAcraShardsFresh()` (downloader.ensureFresh across 27 shards) and
 // then `queryAllAcraShards()` (full-table cache.query union), ingesting the
-// ENTIRE ~56 MB / 172k-row curated dataset into local SQLite on every use.
+// ENTIRE collection into local SQLite on every use.
 //
 // They now fetch only the relevant subset from data.gov.sg's server-side
-// `datastore_search` API against the SINGLE curated ACRA resource
-// (ACRA_REPRESENTATIVE_DATASET_ID — the same id verified to back the curated
-// `acra_entities` tool). We NEVER ingest the full table again. Where
+// `datastore_search` API and NEVER ingest the full table again. CRITICAL: the
+// ACRA registry is sharded by first-letter-of-entity-name across all 27
+// `ACRA_SHARDS`. `ACRA_SHARDS[0]` (d_8575…) is ONLY the "A" shard (~1/27 of the
+// registry) — it is NOT a curated full dataset. So get_entity, search, AND
+// formations all fan out across EVERY shard (bounded + concurrency-limited);
+// querying a single shard silently misses ~26/27 of all SG companies. Where
 // datastore_search can't express a filter (ssic_prefix / postal_code_prefix /
-// incorporation-date window), we fetch the q/status-filtered subset (bounded
-// via limit/offset) and refine it client-side — these are best-effort.
+// incorporation-date window), we fetch the q/status-filtered subset (bounded)
+// and refine it client-side — these are best-effort.
 
 /**
- * Single curated ACRA resource queried server-side (no shard fan-out).
- * Resolved lazily — `ACRA_REPRESENTATIVE_DATASET_ID` / `ACRA_SHARDS` are
- * declared further down this file, so reading them at module-init time would
- * hit the temporal dead zone. Called only at request time.
+ * datastore_search with transient-failure backoff. data.gov.sg rate-limits the
+ * legacy datastore_search endpoint aggressively (HTTP 429 after a handful of
+ * rapid calls); a 27-shard fan-out trips it constantly. Retry 429/5xx with
+ * exponential backoff so a fan-out crawls through instead of failing — and so a
+ * transient blip is never mistaken for a genuine "no rows" / "not found".
  */
-function acraDatastoreId(): string {
-  return ACRA_REPRESENTATIVE_DATASET_ID;
+async function acraDatastoreSearch(
+  resourceId: string,
+  params: { limit?: number; offset?: number; q?: string; filters?: Record<string, string> },
+): Promise<{ records: Array<Record<string, unknown>>; total: number }> {
+  const MAX_RETRIES = 6;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await datastoreSearch<Record<string, unknown>>(resourceId, params);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const transient = /\b(429|500|502|503|504)\b/u.test(msg);
+      if (transient && attempt < MAX_RETRIES) {
+        await new Promise((r) => setTimeout(r, 500 * 2 ** attempt)); // 0.5,1,2,4,8,16s
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 /**
  * Per-request page size for datastore_search.
@@ -82,18 +106,24 @@ const ACRA_PAGE_SIZE = 2000;
 const ACRA_MAX_FETCH_ROWS = 50000;
 
 /**
- * Page the curated ACRA resource via datastore_search, pushing what the
- * endpoint supports server-side: `q` (full-text on entity name) and exact
- * `filters` (e.g. uen, entity_status_description). Range/prefix predicates
- * are NOT expressible here and must be refined client-side by the caller.
+ * Fan out a datastore_search subset fetch across ALL 27 ACRA shards, pushing
+ * what the endpoint supports server-side: `q` (full-text on entity name) and
+ * exact `filters` (e.g. entity_status_description). Range/prefix predicates are
+ * NOT expressible here and must be refined client-side by the caller.
  *
- * Bounded by design:
- *   - With a narrowing predicate (q and/or exact filters) the server returns
- *     only that subset; we page through it up to `maxRows`.
- *   - With no predicate we still cap at `maxRows` (never the full 172k).
+ * Entities are sharded by first-letter-of-name, so a name/status/SSIC/postal
+ * search MUST read every shard — querying only one (e.g. ACRA_SHARDS[0], the
+ * "A" shard) silently sees ~1/27 of the registry. Bounded by design:
+ *   - A shared global budget (`maxRows`) is spread across shards, so an
+ *     unfiltered or weakly-filtered search can never drag the full ~2M-row
+ *     table down.
+ *   - With a narrowing predicate each shard returns a small subset we page
+ *     through within that budget.
  *
- * Returns the fetched rows, the server-reported `total` for the subset, and a
- * `bounded` flag (true ⇒ rows is a capped slice, not the complete subset).
+ * Returns the fetched rows, the summed server-reported `total` across shards,
+ * and a `bounded` flag (true ⇒ rows is a capped slice, not the complete set).
+ * Fails LOUD: if any shard query errors (after retries) we throw, rather than
+ * return a silently-incomplete subset as if it were complete.
  */
 async function fetchAcraSubset(
   opts: { q?: string; filters?: Record<string, string>; maxRows?: number },
@@ -103,35 +133,60 @@ async function fetchAcraSubset(
     opts.filters && Object.keys(opts.filters).length > 0 ? opts.filters : undefined;
   const q = opts.q && opts.q.length > 0 ? opts.q : undefined;
 
-  const datasetId = acraDatastoreId();
-
-  // Probe the subset size first (limit=1 returns the server-side total).
-  const probe = await datastoreSearch<Record<string, unknown>>(datasetId, {
-    limit: 1,
-    q,
-    filters,
-  });
-  const total = probe.total;
-  const targetRows = Math.min(total, maxRows);
-
+  const queue = ACRA_SHARDS.map((s) => s.datasetId);
+  let cursor = 0;
   const rows: Array<Record<string, unknown>> = [];
-  let offset = 0;
-  while (rows.length < targetRows) {
-    const pageLimit = Math.min(ACRA_PAGE_SIZE, targetRows - rows.length);
-    const res = await datastoreSearch<Record<string, unknown>>(datasetId, {
-      limit: pageLimit,
-      offset,
-      q,
-      filters,
-    });
-    if (res.records.length === 0) break;
-    rows.push(...res.records);
-    offset += res.records.length;
-    if (res.records.length < pageLimit) break; // exhausted the subset
+  let grandTotal = 0;
+  const errors: string[] = [];
+
+  async function worker(): Promise<void> {
+    while (cursor < queue.length) {
+      const shardId = queue[cursor++]!;
+      try {
+        // Probe this shard's subset size (limit=1 returns the server-side total).
+        const probe = await acraDatastoreSearch(shardId, { limit: 1, q, filters });
+        grandTotal += probe.total;
+        let offset = 0;
+        while (offset < probe.total && rows.length < maxRows) {
+          const pageLimit = Math.min(
+            ACRA_PAGE_SIZE,
+            maxRows - rows.length,
+            probe.total - offset,
+          );
+          if (pageLimit <= 0) break;
+          const res = await acraDatastoreSearch(shardId, {
+            limit: pageLimit,
+            offset,
+            q,
+            filters,
+          });
+          if (res.records.length === 0) break;
+          rows.push(...res.records);
+          offset += res.records.length;
+          if (res.records.length < pageLimit) break; // exhausted this shard's subset
+        }
+      } catch (err) {
+        errors.push(err instanceof Error ? err.message : String(err));
+      }
+    }
   }
 
-  const bounded = total > rows.length;
-  return { rows, total, bounded };
+  const workers: Promise<void>[] = [];
+  const n = Math.min(ACRA_FETCH_CONCURRENCY, queue.length);
+  for (let i = 0; i < n; i++) workers.push(worker());
+  await Promise.all(workers);
+
+  // A failed shard query means we did NOT see that shard's matches — returning
+  // the partial result as if complete is exactly the failure mode to kill.
+  if (errors.length > 0) {
+    throw new Error(
+      `datastore_search failed for ${errors.length}/${queue.length} ACRA shard(s) ` +
+        `(results would be incomplete): ${errors[0]}`,
+    );
+  }
+
+  const bounded = grandTotal > rows.length;
+  return { rows, total: grandTotal, bounded };
 }
 
 // ---------------------------------------------------------------------------
@@ -181,8 +236,13 @@ export const ACRA_SHARDS: readonly AcraShard[] = [
 /** First (A-shard) used as the representative datasetId on the registry entry. */
 const ACRA_REPRESENTATIVE_DATASET_ID = ACRA_SHARDS[0]!.datasetId;
 
-/** Small concurrency limit so we don't hammer data.gov.sg. */
-const ACRA_FETCH_CONCURRENCY = 3;
+/**
+ * Small concurrency limit for the get_entity / search shard fan-outs so we
+ * don't hammer data.gov.sg's aggressively rate-limited datastore_search (429s
+ * after a handful of rapid calls — concurrency 2 + acraDatastoreSearch's 429
+ * backoff crawls all 27 shards reliably).
+ */
+const ACRA_FETCH_CONCURRENCY = 2;
 
 // ---------------------------------------------------------------------------
 // Registry entries
@@ -295,6 +355,12 @@ interface AcraSearchOutput {
   returned: number;
   offset: number;
   limit: number;
+  /**
+   * true ⇒ the shard fan-out hit its global row budget, so the fetched subset
+   * (and therefore `total`) is a LOWER BOUND, not the complete match set.
+   * Narrow the query (add `query`/`status`) for an exact count.
+   */
+  bounded: boolean;
   rows: Array<Record<string, unknown>>;
 }
 
@@ -329,12 +395,14 @@ async function handleAcraSearch(
   if (input.status) filters["entity_status_description"] = input.status;
 
   let subsetRows: Array<Record<string, unknown>>;
+  let subsetBounded = false;
   try {
     const opts: { q?: string; filters?: Record<string, string> } = {};
     if (input.query) opts.q = input.query;
     if (Object.keys(filters).length > 0) opts.filters = filters;
     const res = await fetchAcraSubset(opts);
     subsetRows = res.rows;
+    subsetBounded = res.bounded;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     // Graceful error — NEVER fall back to full local ingest.
@@ -383,6 +451,9 @@ async function handleAcraSearch(
     returned: page.length,
     offset,
     limit,
+    // `bounded` propagates the fan-out budget cap: when true, `total` is a
+    // lower bound on the real match count, not a complete tally.
+    bounded: subsetBounded,
     rows: page,
   };
 }
@@ -416,29 +487,61 @@ async function handleAcraGetEntity(
 
   const { uen: targetUen } = AcraGetEntityInput.parse(rawInput);
 
-  // Single exact-match server-side lookup — returns at most the 1 matching
-  // row, no shard fan-out, no local ingest.
-  try {
-    const res = await datastoreSearch<Record<string, unknown>>(acraDatastoreId(), {
-      limit: 1,
-      filters: { uen: targetUen },
-    });
-    if (res.records.length > 0) {
-      return {
-        found: true,
-        uen: targetUen,
-        entity: res.records[0]!,
-        // Keep the field for output-shape compatibility; with the curated
-        // single-resource backend the shard IS the datastore resource.
-        shardDatasetId: acraDatastoreId(),
-      };
+  // A UEN can belong to an entity whose name starts with ANY letter, so it may
+  // live in any of the 27 first-letter shards. Fan out an exact `filters={uen}`
+  // lookup (1 row max per shard) across ALL shards with bounded concurrency,
+  // stopping early on the first hit (UEN is unique). Querying only ACRA_SHARDS[0]
+  // (the "A" shard) returned `found:false` for ~26/27 of the registry — including
+  // the docs' own DBS example (UEN 196800306E). NO local ingest.
+  const queue = ACRA_SHARDS.map((s) => s.datasetId);
+  let cursor = 0;
+  let match: { row: Record<string, unknown>; shardId: string } | undefined;
+  const errors: string[] = [];
+
+  async function worker(): Promise<void> {
+    while (cursor < queue.length && !match) {
+      const shardId = queue[cursor++]!;
+      try {
+        const res = await acraDatastoreSearch(shardId, {
+          limit: 1,
+          filters: { uen: targetUen },
+        });
+        if (res.records.length > 0) {
+          if (!match) match = { row: res.records[0]!, shardId };
+          return; // early stop: UEN is unique, no other shard can match
+        }
+      } catch (err) {
+        errors.push(err instanceof Error ? err.message : String(err));
+      }
     }
-    return { found: false, uen: targetUen };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    // Graceful error — NEVER fall back to full local ingest.
-    throw new Error(`datastore_search failed for ACRA get_entity: ${message}`);
   }
+
+  const workers: Promise<void>[] = [];
+  const n = Math.min(ACRA_FETCH_CONCURRENCY, queue.length);
+  for (let i = 0; i < n; i++) workers.push(worker());
+  await Promise.all(workers);
+
+  if (match) {
+    return {
+      found: true,
+      uen: targetUen,
+      entity: match.row,
+      shardDatasetId: match.shardId,
+    };
+  }
+
+  // No shard matched. If ANY shard query errored (after retries), we CANNOT
+  // assert "not found" — the entity may live in a shard whose query failed.
+  // Fail LOUD rather than return a false `found:false`.
+  if (errors.length > 0) {
+    throw new Error(
+      `datastore_search failed for ACRA get_entity ` +
+        `(${errors.length}/${queue.length} shard queries errored; cannot confirm ` +
+        `not-found): ${errors[0]}`,
+    );
+  }
+
+  return { found: false, uen: targetUen };
 }
 
 // ---------------------------------------------------------------------------
