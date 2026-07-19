@@ -344,9 +344,42 @@ const AcraSearchInput = z.object({
     .regex(/^\d{4}-\d{2}-\d{2}$/u, "YYYY-MM-DD")
     .optional(),
   postal_code_prefix: z.string().min(1).optional(),
+  match: z.enum(["all", "phrase", "any"]).optional(),
   limit: z.number().int().positive().max(500).optional(),
   offset: z.number().int().nonnegative().optional(),
 });
+
+/**
+ * True iff `a` and `b` are within Levenshtein distance 1 (single-band check,
+ * O(len)). Used for the per-token fuzzy fallback in name matching.
+ */
+function editDistanceAtMost1(a: string, b: string): boolean {
+  if (a === b) return true;
+  const la = a.length;
+  const lb = b.length;
+  if (Math.abs(la - lb) > 1) return false;
+  let i = 0;
+  let j = 0;
+  let edits = 0;
+  while (i < la && j < lb) {
+    if (a[i] === b[j]) {
+      i += 1;
+      j += 1;
+      continue;
+    }
+    edits += 1;
+    if (edits > 1) return false;
+    if (la === lb) {
+      i += 1;
+      j += 1;
+    } else if (la > lb) {
+      i += 1;
+    } else {
+      j += 1;
+    }
+  }
+  return edits + (la - i) + (lb - j) <= 1;
+}
 
 type AcraSearchInput = z.infer<typeof AcraSearchInput>;
 
@@ -440,11 +473,56 @@ async function handleAcraSearch(
     return true;
   });
 
-  // Sort by entity_name for stable pagination.
-  refined.sort((a, b) => entityName(a).localeCompare(entityName(b)));
+  // Name-relevance stage (2026-07-19): datastore_search's full-text `q`
+  // tokenizes and OR-matches, so a multi-word name ("CHONG FONG") matches
+  // every CHONG and every FONG (~7k rows). Default `match:"all"` requires
+  // every token in entity_name and ranks exact > prefix > phrase > all-tokens;
+  // when strict matching finds nothing it falls back to per-token fuzzy
+  // (edit distance ≤1, tokens ≥4 chars). "phrase" requires the contiguous
+  // phrase; "any" keeps the raw upstream OR behavior.
+  const matchMode = input.match ?? "all";
+  const rawQuery = (input.query ?? "").trim().toUpperCase();
+  const tokens = rawQuery.split(/\s+/u).filter(Boolean);
+  let ranked: Array<Record<string, unknown>>;
+  if (tokens.length > 0 && matchMode !== "any") {
+    const strictTier = (name: string): number => {
+      if (name === rawQuery) return 0;
+      if (name.startsWith(rawQuery)) return 1;
+      if (name.includes(rawQuery)) return 2;
+      if (tokens.every((t) => name.includes(t))) return 3;
+      return -1;
+    };
+    const fuzzyHasAll = (name: string): boolean => {
+      const words = name.split(/[^A-Z0-9]+/u).filter(Boolean);
+      return tokens.every(
+        (t) =>
+          name.includes(t) ||
+          (t.length >= 4 && words.some((w) => editDistanceAtMost1(w, t))),
+      );
+    };
+    const maxTier = matchMode === "phrase" ? 2 : 3;
+    let scored = refined
+      .map((row) => ({ row, tier: strictTier(entityName(row).toUpperCase()) }))
+      .filter((s) => s.tier >= 0 && s.tier <= maxTier);
+    if (scored.length === 0 && matchMode === "all") {
+      scored = refined
+        .filter((row) => fuzzyHasAll(entityName(row).toUpperCase()))
+        .map((row) => ({ row, tier: 4 }));
+    }
+    scored.sort(
+      (a, b) =>
+        a.tier - b.tier || entityName(a.row).localeCompare(entityName(b.row)),
+    );
+    ranked = scored.map((s) => s.row);
+  } else {
+    // No query (filter-only search) or explicit match:"any" — stable name sort.
+    ranked = [...refined].sort((a, b) =>
+      entityName(a).localeCompare(entityName(b)),
+    );
+  }
 
-  const total = refined.length;
-  const page = refined.slice(offset, offset + limit);
+  const total = ranked.length;
+  const page = ranked.slice(offset, offset + limit);
 
   return {
     total,
@@ -804,7 +882,12 @@ export function createAcraTools(
         "`incorporated_before`, YYYY-MM-DD), and postal code prefix " +
         "(`postal_code_prefix`). query+status are pushed server-side; SSIC/" +
         "postal/date predicates are refined client-side on the bounded fetched " +
-        "subset. Sorted by entity_name, paginated via limit/offset.",
+        "subset. Multi-word queries default to match:'all' (every token must " +
+        "appear in entity_name, ranked exact > prefix > phrase > all-tokens, " +
+        "with an edit-distance-1 fuzzy fallback when nothing matches " +
+        "strictly); match:'phrase' requires the contiguous phrase; " +
+        "match:'any' keeps raw upstream OR matching. Paginated via " +
+        "limit/offset.",
       inputSchema: AcraSearchInput,
       handler: (input: unknown) => handleAcraSearch(cache, downloader, input),
     },
