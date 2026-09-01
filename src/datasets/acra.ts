@@ -34,6 +34,10 @@
  */
 
 import { z } from "zod";
+import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
+import * as nodePath from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   type DatasetCache,
@@ -77,7 +81,12 @@ async function acraDatastoreSearch(
   const MAX_RETRIES = 6;
   for (let attempt = 0; ; attempt++) {
     try {
-      return await datastoreSearch<Record<string, unknown>>(resourceId, params);
+      await acraSlotAcquire(); // cap in-flight past the data.gov.sg limiter
+      try {
+        return await datastoreSearch<Record<string, unknown>>(resourceId, params);
+      } finally {
+        acraSlotRelease();
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const transient = /\b(429|500|502|503|504)\b/u.test(msg);
@@ -245,9 +254,77 @@ const ACRA_REPRESENTATIVE_DATASET_ID = ACRA_SHARDS[0]!.datasetId;
 // 2026-09-01: was 2 — a not-found UEN/entity name scans all 27 shards, and at
 // concurrency 2 that is 14 serial round-trips ≈ 38s+, which blew past kimi's
 // MCP client timeout EVERY attempt (-32001 retry death-spiral, 7 min of
-// token burn on a single lookup). 6 keeps us well under the timeout while
-// staying polite to data.gov.sg rate limits.
-const ACRA_FETCH_CONCURRENCY = 6;
+// token burn on a single lookup). But naive concurrency ALSO fails: burst
+// testing showed data.gov.sg 429s anything above ~4-5 rapid requests, and
+// the 429 backoff storm made c=6 SLOWER (82s measured). So: modest pool (3)
+// plus the launch-pacing gate below, which keeps in-flight requests under
+// the rate limit instead of crawling through backoffs.
+const ACRA_FETCH_CONCURRENCY = 3;
+
+/**
+ * In-flight limiter (2026-09-01): data.gov.sg 429s the instant more than
+ * ~4-5 requests are in flight (measured live). Pacing request STARTS is not
+ * enough — with ~1-3s response times a 300ms start-gap still stacks ~9
+ * concurrent — so this is a proper counting semaphore capping IN-FLIGHT
+ * requests at 3, safely under the limit. Workers queue on it; the slot is
+ * held only during the request itself, not during backoff sleeps.
+ */
+const ACRA_MAX_IN_FLIGHT = 3;
+let _acraInFlight = 0;
+const _acraWaiters: Array<() => void> = [];
+
+async function acraSlotAcquire(): Promise<void> {
+  if (_acraInFlight >= ACRA_MAX_IN_FLIGHT) {
+    await new Promise<void>((res) => _acraWaiters.push(res));
+  }
+  _acraInFlight++;
+}
+
+function acraSlotRelease(): void {
+  _acraInFlight--;
+  const next = _acraWaiters.shift();
+  if (next) next();
+}
+
+/**
+ * Disk result cache (2026-09-01). ACRA rows are near-static (entity registry
+ * snapshots), and the failure mode that burned 7 minutes of kimi tokens was
+ * the SAME lookup retried over and over. Cache both hits AND not-founds for
+ * 24h so an agent retry loop gets an instant definitive answer instead of
+ * re-fanning 27 shards. Best-effort: any cache error is ignored.
+ */
+const ACRA_CACHE_DIR = nodePath.resolve(
+  fileURLToPath(new URL(".", import.meta.url)), "..", "..", "cache", "acra",
+);
+const ACRA_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+function acraCacheKey(kind: string, value: string): string {
+  return `${kind}_${createHash("sha1").update(value).digest("hex").slice(0, 24)}`;
+}
+
+async function acraCacheRead(key: string): Promise<unknown | undefined> {
+  try {
+    const raw = await fs.readFile(
+      nodePath.join(ACRA_CACHE_DIR, `${key}.json`), "utf8",
+    );
+    const rec = JSON.parse(raw) as { t: number; v: unknown };
+    return Date.now() - rec.t <= ACRA_CACHE_TTL_MS ? rec.v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function acraCacheWrite(key: string, v: unknown): Promise<void> {
+  try {
+    await fs.mkdir(ACRA_CACHE_DIR, { recursive: true });
+    const final = nodePath.join(ACRA_CACHE_DIR, `${key}.json`);
+    const tmp = `${final}.${process.pid}.tmp`;
+    await fs.writeFile(tmp, JSON.stringify({ t: Date.now(), v }));
+    await fs.rename(tmp, final);
+  } catch {
+    /* best-effort */
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Registry entries
@@ -416,6 +493,16 @@ async function handleAcraSearch(
   const limit = input.limit ?? 50;
   const offset = input.offset ?? 0;
 
+  // 24h disk cache keyed on the full canonical input — repeated identical
+  // searches (agent retry loops) must not re-fan 27 shards.
+  const searchCacheKey = acraCacheKey(
+    "search", JSON.stringify([input.query, input.status, input.ssic_prefix,
+      input.postal_code_prefix, input.incorporated_after, input.incorporated_before,
+      limit, offset]),
+  );
+  const searchCached = await acraCacheRead(searchCacheKey);
+  if (searchCached !== undefined) return searchCached as AcraSearchOutput;
+
   // Push what datastore_search supports server-side:
   //   - `query`  → full-text `q` on entity name.
   //   - `status` → exact `filters.entity_status_description`.
@@ -529,7 +616,7 @@ async function handleAcraSearch(
   const total = ranked.length;
   const page = ranked.slice(offset, offset + limit);
 
-  return {
+  const searchResult = {
     total,
     returned: page.length,
     offset,
@@ -539,6 +626,8 @@ async function handleAcraSearch(
     bounded: subsetBounded,
     rows: page,
   };
+  await acraCacheWrite(searchCacheKey, searchResult);
+  return searchResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -569,6 +658,12 @@ async function handleAcraGetEntity(
   void _downloader;
 
   const { uen: targetUen } = AcraGetEntityInput.parse(rawInput);
+
+  // 24h disk cache (hits AND not-founds) — an agent retry loop must get an
+  // instant definitive answer, never re-fan 27 shards for the same UEN.
+  const cacheKey = acraCacheKey("get", targetUen);
+  const cached = await acraCacheRead(cacheKey);
+  if (cached !== undefined) return cached as AcraGetEntityOutput;
 
   // A UEN can belong to an entity whose name starts with ANY letter, so it may
   // live in any of the 27 first-letter shards. Fan out an exact `filters={uen}`
@@ -604,15 +699,6 @@ async function handleAcraGetEntity(
   for (let i = 0; i < n; i++) workers.push(worker());
   await Promise.all(workers);
 
-  if (match) {
-    return {
-      found: true,
-      uen: targetUen,
-      entity: match.row,
-      shardDatasetId: match.shardId,
-    };
-  }
-
   // No shard matched. If ANY shard query errored (after retries), we CANNOT
   // assert "not found" — the entity may live in a shard whose query failed.
   // Fail LOUD rather than return a false `found:false`.
@@ -624,7 +710,11 @@ async function handleAcraGetEntity(
     );
   }
 
-  return { found: false, uen: targetUen };
+  const result = match
+    ? { found: true as const, uen: targetUen, entity: match.row, shardDatasetId: match.shardId }
+    : { found: false as const, uen: targetUen };
+  await acraCacheWrite(cacheKey, result);
+  return result;
 }
 
 // ---------------------------------------------------------------------------

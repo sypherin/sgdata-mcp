@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.4 — 2026-09-01
+
+### Fixes: ACRA fan-out could hang for minutes (agent token death-spirals)
+
+- **20s per-request hard timeout.** A hung data.gov.sg connection previously
+  stalled a fetch forever; the MCP client timed out (-32001), retried, and
+  burned tokens re-entering the same hang. Requests now fail fast via
+  `AbortSignal.timeout`.
+- **In-flight semaphore (≤3).** Measured live: data.gov.sg 429s the instant
+  more than ~4-5 requests are in flight. The old concurrency-2 pool was slow
+  (27-shard worst case ≈ 38s+, past typical MCP client timeouts); naive
+  higher concurrency was *slower still* (82s measured — 429 backoff storms).
+  A counting semaphore capping in-flight requests at 3 keeps fan-outs clean:
+  cold 27-shard lookups now complete in seconds, no 429 storms.
+- **24h disk result cache for `sg_acra_get_entity` / `sg_acra_search_entities`
+  (hits AND not-founds).** The failure mode that motivated this release: an
+  agent retried the same UEN lookup in a loop, each attempt re-fanning 27
+  shards into the timeout. Repeated identical calls now return instantly.
+
 ## 0.5.0 — 2026-06-04
 
 ### New tools (13)
