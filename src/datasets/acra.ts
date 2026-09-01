@@ -242,7 +242,12 @@ const ACRA_REPRESENTATIVE_DATASET_ID = ACRA_SHARDS[0]!.datasetId;
  * after a handful of rapid calls — concurrency 2 + acraDatastoreSearch's 429
  * backoff crawls all 27 shards reliably).
  */
-const ACRA_FETCH_CONCURRENCY = 2;
+// 2026-09-01: was 2 — a not-found UEN/entity name scans all 27 shards, and at
+// concurrency 2 that is 14 serial round-trips ≈ 38s+, which blew past kimi's
+// MCP client timeout EVERY attempt (-32001 retry death-spiral, 7 min of
+// token burn on a single lookup). 6 keeps us well under the timeout while
+// staying polite to data.gov.sg rate limits.
+const ACRA_FETCH_CONCURRENCY = 6;
 
 // ---------------------------------------------------------------------------
 // Registry entries
@@ -683,6 +688,7 @@ async function datastoreSearchSorted(
   for (let attempt = 0; ; attempt++) {
     const res = await fetch(url, {
       headers: { "User-Agent": "sgdata-mcp/0.1 (+https://altronis.sg)" },
+      signal: AbortSignal.timeout(20_000), // fail fast, never hang the MCP client (2026-09-01)
     });
     if (res.status === 429 && attempt < MAX_RETRIES) {
       await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt)); // 1,2,4,8,16s

@@ -76,9 +76,19 @@ interface ApiEnvelope<T> {
   errorMsg?: string;
 }
 
+/**
+ * Per-request hard timeout (2026-09-01). Before this, a hung data.gov.sg
+ * connection stalled the fetch forever — the MCP client timed out (-32001),
+ * retried, and burned tokens re-entering the same hang. 20s is ~10x a normal
+ * round-trip; callers with legitimately slow paths (CSV downloads) pass their
+ * own signal via init.
+ */
+const HTTP_TIMEOUT_MS = 20_000;
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     ...init,
+    signal: init?.signal ?? AbortSignal.timeout(HTTP_TIMEOUT_MS),
     headers: {
       Accept: "application/json",
       // Only send Content-Type when there's a request body. data.gov.sg's
