@@ -30,7 +30,7 @@ if (allP.tools.some((t) => t.name === "sg_dispatch"))
 const t0 = Date.now();
 const res = await client.callTool({
   name: "sg_dispatch",
-  arguments: { tool: "acra_query_uen", args: { uen: "196800306E" } },
+  arguments: { tool: "sg_acra_get_entity", args: { uen: "196800306E" } },
 });
 const body = JSON.parse(res.content[0].text);
 const hit = JSON.stringify(body).includes("DBS");
