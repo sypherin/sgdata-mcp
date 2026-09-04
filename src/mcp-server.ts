@@ -103,21 +103,28 @@ function buildToolRegistry(
     }),
     handler: async (input: { filter?: string }) => {
       const f = (input?.filter ?? "").toLowerCase();
-      const out = [...byName.values()]
+      const matched = [...byName.values()]
         .filter((t) => !META.has(t.name))
         .filter(
           (t) =>
             !f ||
             t.name.toLowerCase().includes(f) ||
             t.description.toLowerCase().includes(f),
-        )
-        .map((t) => ({
-          name: t.name,
-          description: t.description,
-          inputSchema: toolInputJsonSchema(t),
-        }));
+        );
+      // Full JSON schemas ONLY when the set is small (a filter narrowed it). An
+      // unfiltered catalog (~90 tools) returns COMPACT name+description so it never
+      // dumps ~40k tokens into a local model's prompt (Zach 2026-09-04).
+      const compact = matched.length > 8;
+      const out = matched.map((t) =>
+        compact
+          ? { name: t.name, description: t.description }
+          : { name: t.name, description: t.description, inputSchema: toolInputJsonSchema(t) },
+      );
       return {
         toolCount: out.length,
+        schemas: compact
+          ? "omitted (too many) — re-call with a `filter` to get schemas, or just sg_dispatch and the validation error shows the arg shape"
+          : "included",
         hint: "invoke any of these with sg_dispatch {tool, args}",
         tools: out,
       };
