@@ -20,6 +20,12 @@ keys. Small curated datasets cache locally at `~/.sgdata-mcp/sgdata.sqlite`;
 large datasets (ACRA, HDB resale) and real-time feeds query data.gov.sg
 server-side so they never download a whole dataset onto your disk.
 
+**v0.5.5:** two helper tools for small-context clients. `sg_tool_catalog`
+lists the tools (filter by keyword to get their input schemas) and
+`sg_dispatch` calls any of them by name, so a client can expose just these two
+instead of all 87 schemas. Dispatched calls are checked against the target
+tool's schema, the same as a direct call.
+
 **v0.5.0:** 13 new tools + a smaller footprint. **Real-time feeds** — `sg_psi`
 (air quality), `sg_weather_forecast`, `sg_air_temperature`, `sg_rainfall`,
 `sg_carpark_availability`, and `sg_dengue_clusters` (live NEA clusters — current
@@ -228,7 +234,7 @@ printf '%s\n' \
 | 23 | **Government Hawker Centres** | NEA | 2 |
 | 24 | **Business Entity Formations & Cessations** | ACRA/DOS | 6 |
 
-Plus **3 generic fallback tools**, **1 visualization tool**, **2 cross-dataset tools**, and **1 natural language query tool**. Total: **74 tools.**
+Plus **3 generic fallback tools**, **1 visualization tool**, **2 cross-dataset tools**, and **1 natural language query tool**: 74 tools. The 6 real-time feeds and 7 SingStat tables from v0.5.0 bring it to **87 data tools**, plus the 2 helpers from v0.5.5.
 
 ---
 
@@ -284,12 +290,16 @@ sgdata-cli datasets
 
 ---
 
-### Tools (74)
+### Tools (87 + 2 helpers)
+
+The tables below list 74 of them; the 13 added in v0.5.0 are listed at the top.
 
 #### Meta tools
 
 | Tool | Description |
 |------|-------------|
+| `sg_tool_catalog` | List the tools with descriptions; filter by keyword to get their input schemas |
+| `sg_dispatch` | Call any tool by name with a JSON args object, checked against that tool's schema |
 | `sg_ask` | Natural language query — ask any question about Singapore data in plain English |
 | `sg_visualize` | ASCII sparkline + summary stats + chart-ready JSON from any numeric series |
 | `sg_cross_dataset` | Compare two datasets over time with automatic period alignment |
@@ -432,7 +442,7 @@ independently verify any data before making decisions based on it**.
 
 **How often is data refreshed?** Per-dataset, from daily to annually.
 
-**Is this production-ready?** Yes. 74 tools, all tested against live data.
+**Is this production-ready?** Yes. 87 tools, all tested against live data.
 File issues on GitHub if you hit anything sharp.
 
 **Can I add my own dataset?** Yes — either use the generic tools for ad-hoc

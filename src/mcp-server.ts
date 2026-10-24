@@ -62,6 +62,28 @@ function log(msg: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Argument parsing — one path for direct calls and sg_dispatch, so both apply
+// the tool's defaults and report a bad arg the same way.
+// ---------------------------------------------------------------------------
+
+function parseToolArgs(tool: ToolDef, rawArgs: unknown): unknown {
+  try {
+    return tool.inputSchema.parse(rawArgs ?? {});
+  } catch (err) {
+    const zerr = err as ZodError;
+    const issues = Array.isArray(zerr?.issues)
+      ? zerr.issues
+          .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+          .join("; ")
+      : (err as Error).message;
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `Invalid arguments for tool "${tool.name}": ${issues}`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Tool registry
 // ---------------------------------------------------------------------------
 
@@ -151,7 +173,7 @@ function buildToolRegistry(
           `Unknown tool "${input.tool}". Use sg_tool_catalog to list tools.`,
         );
       }
-      return target.handler(input.args ?? {});
+      return target.handler(parseToolArgs(target, input.args));
     },
   };
   byName.set(catalog.name, catalog);
@@ -235,21 +257,7 @@ async function main(): Promise<void> {
       );
     }
 
-    let parsedInput: unknown;
-    try {
-      parsedInput = tool.inputSchema.parse(rawArgs ?? {});
-    } catch (err) {
-      const zerr = err as ZodError;
-      const issues = Array.isArray(zerr?.issues)
-        ? zerr.issues
-            .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
-            .join("; ")
-        : (err as Error).message;
-      throw new McpError(
-        ErrorCode.InvalidParams,
-        `Invalid arguments for tool "${name}": ${issues}`,
-      );
-    }
+    const parsedInput = parseToolArgs(tool, rawArgs);
 
     try {
       const result = await tool.handler(parsedInput);
@@ -267,6 +275,8 @@ async function main(): Promise<void> {
         ],
       };
     } catch (err) {
+      // sg_dispatch reports a bad arg for its target as InvalidParams; keep that code.
+      if (err instanceof McpError) throw err;
       const msg = err instanceof Error ? err.message : String(err);
       throw new McpError(
         ErrorCode.InternalError,

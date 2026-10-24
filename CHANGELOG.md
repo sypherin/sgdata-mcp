@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.5 - 2026-10-25
+
+### New: two helper tools for small-context clients
+
+- **`sg_tool_catalog`** lists every tool with its description. Pass a
+  `filter` (e.g. `acra`, `hdb`, `carpark`) to get the matching tools' input
+  schemas. More than 8 matches come back as name and description only, so an
+  unfiltered call stays small.
+- **`sg_dispatch`** calls any tool by name with a JSON `args` object. A client
+  can expose just these two tools instead of all 87 schemas.
+
+### Fixes
+
+- **`sg_dispatch` now checks args against the target tool's schema**, the same
+  path as a direct call. Before, defaults were not applied and a bad arg came
+  back as a raw validation dump instead of `Invalid arguments for tool "X"`.
+  Covered by `test/dispatch-validate.mjs`.
+
 ## 0.5.4 — 2026-09-01
 
 ### Fixes: ACRA fan-out could hang for minutes (agent token death-spirals)
