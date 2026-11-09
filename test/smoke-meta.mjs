@@ -3,7 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const transport = new StdioClientTransport({
-  command: "node",
+  command: process.execPath,
   args: ["dist/mcp-server.js"],
 });
 const client = new Client({ name: "smoke", version: "0.0.0" });

@@ -4,7 +4,7 @@
  * PASS / WARN / FAIL. Run after build:  node test/test-all-tools.mjs
  *
  * Phase 1 harvests valid args (a dataset id, a UEN, a carpark no, a disease)
- * from the discovery tools, then Phase 2 calls all 74 tools.
+ * from the discovery tools, then Phase 2 calls every listed tool (89 in 0.5.5).
  *
  * Notes baked in from the 2026-06-04 QC run:
  *  - base_year/target_year on sg_employment_growth are NUMBERS, not strings.
@@ -16,7 +16,7 @@
  */
 import { spawn } from "node:child_process";
 const SERVER = process.env.HOME + "/sg-data-mcp/dist/mcp-server.js";
-const srv = spawn("node", [SERVER], { stdio: ["pipe", "pipe", "pipe"] });
+const srv = spawn(process.execPath, [SERVER], { stdio: ["pipe", "pipe", "pipe"] });
 let buf = ""; const pending = new Map();
 srv.stdout.on("data", d => { buf += d.toString(); let i;
   while ((i = buf.indexOf("\n")) >= 0) { const l = buf.slice(0, i); buf = buf.slice(i + 1);
@@ -54,8 +54,9 @@ const DISEASE = await harvest("sg_disease_list", {}, ["disease", "name"]) || "De
 const SMALL_DS = "d_ca0b908cf06a267ca06acbd5feb4465c"; // crime (small) — for generic query
 
 const ARGS = {
+  sg_dispatch: { tool: "sg_coe_latest", args: {} }, sg_tool_catalog: { filter: "hdb" }, // 0.5.5 meta-tools
   sg_search_datasets: { query: "resale", limit: 3 }, sg_dataset_schema: { datasetId: SMALL_DS }, sg_dataset_query: { datasetId: SMALL_DS, limit: 3 },
-  sg_acra_search_entities: { query: "pte", limit: 3 }, sg_acra_get_entity: { uen: UEN }, sg_acra_formations_by_ssic: { ssic_prefix: "62", year: "2023" },
+  sg_acra_search_entities: { query: "pte", limit: 3 }, sg_acra_get_entity: { uen: UEN }, sg_acra_formations_by_ssic: { ssic_prefix: "62", year: String(new Date().getFullYear()) }, // older years crawl past the 180s window (README: heavy tool)
   sg_hdb_resale_search: { town: "BEDOK", limit: 3 }, sg_hdb_resale_stats: { town: "BEDOK" },
   sg_coe_latest: {}, sg_coe_history: { vehicle_class: "A", months_back: 6 }, sg_coe_demand_supply: { vehicle_class: "A", months_back: 6 },
   sg_moe_search_schools: { query: "primary", limit: 3 }, sg_moe_school_by_name: { name: "Raffles" }, sg_moe_schools_near: { postal_code: "560123" },

@@ -39,8 +39,8 @@
     "dev": "tsx src/mcp-server.ts",
     "cli": "tsx src/cli.ts",
     "test:smoke": "tsx test/smoke.ts",
-    "test": "npm run build && node test/retry-429.mjs && node test/dispatch-validate.mjs && node test/count-meta.mjs && node test/smoke-meta.mjs && node test/hdb-recent.mjs",
-    "test:all-tools": "npm run build && node test/test-all-tools.mjs",
+    "test": "npm run build && \"$npm_node_execpath\" test/retry-429.mjs && \"$npm_node_execpath\" test/dispatch-validate.mjs && \"$npm_node_execpath\" test/count-meta.mjs && \"$npm_node_execpath\" test/smoke-meta.mjs && \"$npm_node_execpath\" test/hdb-recent.mjs",
+    "test:all-tools": "npm run build && \"$npm_node_execpath\" test/test-all-tools.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
