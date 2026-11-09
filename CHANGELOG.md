@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.5 - 2026-10-25
+## 0.5.5 - 2026-11-09
 
 ### New: two helper tools for small-context clients
 
@@ -17,6 +17,23 @@
   path as a direct call. Before, defaults were not applied and a bad arg came
   back as a raw validation dump instead of `Invalid arguments for tool "X"`.
   Covered by `test/dispatch-validate.mjs`.
+- **HDB resale search/stats with no town or flat_type now read the newest
+  sales.** The one bounded page they fetch had no sort, so it was the
+  dataset's natural order, Jan 2017: "current" stats were 2017 prices and a
+  `month_from` on recent months matched nothing. Pages now come back
+  `month desc`, which also keeps offset paging stable. Filtered results
+  (town, flat_type) are newest first too, where they used to be oldest first. Covered by
+  `test/hdb-recent.mjs` (live). `datastoreSearch` takes a `sort` option.
+- **429 from data.gov.sg is retried** (waits Retry-After, else 1, 2, 4, 8s,
+  at most 15s of waiting per request; one stderr line per retry) instead of
+  failing the tool call. Other errors still fail at once. ACRA keeps its own tuned backoff and opts out.
+  Covered by `test/retry-429.mjs`.
+- **Dependencies:** `@modelcontextprotocol/sdk` 1.32.2 and transitive fixes
+  (`npm audit --omit=dev`: 11 findings to 2). The 2 left need major bumps
+  (`zod` 4, `csv-parse` 7) and stay for a later release; the server runs over
+  stdio only, so the SDK's HTTP-transport advisories did not apply.
+- `npm test` runs the offline and quick live checks; `npm run test:all-tools`
+  calls every tool live.
 
 ## 0.5.4 — 2026-09-01
 

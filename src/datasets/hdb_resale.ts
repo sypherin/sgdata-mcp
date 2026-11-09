@@ -45,6 +45,7 @@ type Row = Record<string, string | null>;
 const MAX_FETCH_ROWS = 50000;
 /** Per-request page size for datastore_search (server max is ~10k). */
 const PAGE_SIZE = 10000;
+const HDB_SORT = "month desc, _id desc";
 
 function toNumber(v: unknown): number | null {
   if (v == null) return null;
@@ -101,10 +102,12 @@ export function createHdbResaleTools(
    *   - If a narrowing exact filter is supplied (town and/or flat_type), the
    *     server returns only that subset (e.g. town=BEDOK ≈ 12k rows) and we
    *     page through all of it (capped at MAX_FETCH_ROWS).
-   *   - If NO exact filter is supplied, we deliberately do NOT pull all 232k
-   *     rows: we fetch a single bounded page (most-recent rows aren't
-   *     orderable via this legacy endpoint, so it's the dataset's natural
-   *     order — `bounded: true` is surfaced so callers know it's a slice).
+   *   - If NO exact filter is supplied, we deliberately do NOT pull all 244k
+   *     rows: we fetch a single bounded page, NEWEST first (`sort: month desc`;
+   *     `bounded: true` is surfaced so callers know it's a slice).
+   *     Before 9 Nov 2026 there was no sort, so this page was the natural
+   *     order, Jan 2017, and "current" stats were 2017 prices
+   *     (test/hdb-recent.mjs).
    *
    * Returns the fetched rows plus a `bounded` flag and the server-reported
    * `total` for the filtered subset.
@@ -129,10 +132,13 @@ export function createHdbResaleTools(
     let offset = 0;
     while (rows.length < targetRows) {
       const pageLimit = Math.min(PAGE_SIZE, targetRows - rows.length);
+      // Newest first, so a capped slice holds the latest sales, and the order
+      // is stable across offset pages.
       const res = await datastoreSearch<Row>(hdbResaleEntry.datasetId, {
         limit: pageLimit,
         offset,
         filters,
+        sort: HDB_SORT,
       });
       if (res.records.length === 0) break;
       rows.push(...res.records);

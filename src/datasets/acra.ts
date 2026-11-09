@@ -83,7 +83,8 @@ async function acraDatastoreSearch(
     try {
       await acraSlotAcquire(); // cap in-flight past the data.gov.sg limiter
       try {
-        return await datastoreSearch<Record<string, unknown>>(resourceId, params);
+        // Own 429 backoff below (it frees the slot while waiting), so skip the core retry.
+        return await datastoreSearch<Record<string, unknown>>(resourceId, params, { retry429: false });
       } finally {
         acraSlotRelease();
       }
@@ -754,11 +755,13 @@ interface AcraFormationsOutput {
 /**
  * Direct datastore_search call that supports the `sort` param.
  *
- * The shared `datastoreSearch` helper in core deliberately doesn't expose
- * `sort`, but the legacy endpoint DOES honour it (verified:
- * `sort=registration_incorporation_date desc` returns newest-first). We need
- * that for the formations scan (see scanShardForFormations), so we hit the
- * endpoint directly here. Still server-side / paged — NO local ingest.
+ * Written when the shared `datastoreSearch` helper had no `sort`; it has one
+ * since 9 Nov 2026 (HDB resale uses it). This loop keeps its own longer 429
+ * backoff (1-16s, no Retry-After, no 15s budget) because the formations scan
+ * is a known 1-3 minute crawl; fold it in only after re-testing that scan.
+ * The legacy endpoint honours `sort` (verified:
+ * `sort=registration_incorporation_date desc` returns newest-first). Still
+ * server-side / paged — NO local ingest.
  */
 async function datastoreSearchSorted(
   resourceId: string,
@@ -781,6 +784,7 @@ async function datastoreSearchSorted(
       signal: AbortSignal.timeout(20_000), // fail fast, never hang the MCP client (2026-09-01)
     });
     if (res.status === 429 && attempt < MAX_RETRIES) {
+      await res.body?.cancel().catch(() => {}); // free the connection while waiting
       await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt)); // 1,2,4,8,16s
       continue;
     }

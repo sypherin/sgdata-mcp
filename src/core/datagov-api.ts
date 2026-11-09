@@ -85,8 +85,55 @@ interface ApiEnvelope<T> {
  */
 const HTTP_TIMEOUT_MS = 20_000;
 
-async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, {
+/**
+ * data.gov.sg rate-limits keyless calls (datastore_search: about 4 per 10s) and
+ * answers 429. Every caller used to surface that as a failed tool call, so an
+ * agent firing two HDB queries back to back got an error (9 Nov 2026). Retry
+ * 429 only, waiting Retry-After when sent, else 1, 2, 4, 8s; anything else
+ * fails at once. All waits in one call share a 15s budget, so a tool still
+ * answers well inside an MCP client's 60s timeout (the 0.5.4 death-spiral).
+ * Each retry logs one stderr line (stdout is the MCP pipe).
+ * Covered by test/retry-429.mjs.
+ */
+const MAX_429_RETRIES = 4;
+const RETRY_BUDGET_MS = 15_000;
+
+function retryDelayMs(res: Response, attempt: number): number {
+  const header = res.headers.get("Retry-After"); // null when absent, and Number(null) is 0
+  const after = header == null || header.trim() === "" ? NaN : Number(header);
+  if (Number.isFinite(after) && after >= 0) return after * 1000;
+  return 1000 * 2 ** attempt;
+}
+
+async function fetchJson<T>(
+  url: string,
+  init?: RequestInit,
+  opts: { retry429?: boolean } = {},
+): Promise<T> {
+  const retries = opts.retry429 === false ? 0 : MAX_429_RETRIES;
+  let waited = 0;
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetchOnce(url, init);
+    const wait = res.status === 429 ? retryDelayMs(res, attempt) : 0;
+    if (res.status === 429 && attempt < retries && waited + wait <= RETRY_BUDGET_MS) {
+      waited += wait;
+      await res.body?.cancel().catch(() => {});
+      console.error(`[sgdata-mcp] data.gov.sg 429, retry ${attempt + 1}/${MAX_429_RETRIES} in ${wait}ms`);
+      await new Promise((r) => setTimeout(r, wait));
+      continue;
+    }
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(
+        `data.gov.sg ${res.status} ${res.statusText} — ${url}${body ? ` — ${body.slice(0, 200)}` : ""}`,
+      );
+    }
+    return (await res.json()) as T;
+  }
+}
+
+function fetchOnce(url: string, init?: RequestInit): Promise<Response> {
+  return fetch(url, {
     ...init,
     signal: init?.signal ?? AbortSignal.timeout(HTTP_TIMEOUT_MS),
     headers: {
@@ -100,13 +147,6 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
       ...(init?.headers ?? {}),
     },
   });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(
-      `data.gov.sg ${res.status} ${res.statusText} — ${url}${body ? ` — ${body.slice(0, 200)}` : ""}`,
-    );
-  }
-  return (await res.json()) as T;
 }
 
 /** Fetch collection metadata, including the list of child dataset ids. */
@@ -280,18 +320,23 @@ export async function datastoreSearch<T = Record<string, unknown>>(
     offset?: number;
     q?: string;
     filters?: Record<string, string>;
+    /** e.g. "month desc". Without it rows come back in the dataset's natural (oldest-first) order. */
+    sort?: string;
   } = {},
+  /** retry429: false when the caller runs its own 429 backoff (ACRA's slot pool). */
+  opts: { retry429?: boolean } = {},
 ): Promise<{ records: T[]; total: number }> {
   const qs = new URLSearchParams({ resource_id: resourceId });
   if (params.limit != null) qs.set("limit", String(params.limit));
   if (params.offset != null) qs.set("offset", String(params.offset));
   if (params.q) qs.set("q", params.q);
   if (params.filters) qs.set("filters", JSON.stringify(params.filters));
+  if (params.sort) qs.set("sort", params.sort);
   const url = `${LEGACY_BASE}/datastore_search?${qs}`;
   const json = await fetchJson<{
     success?: boolean;
     result?: { records?: T[]; total?: number };
-  }>(url);
+  }>(url, undefined, opts);
   if (!json.success) throw new Error(`datastore_search failed: ${url}`);
   return {
     records: json.result?.records ?? [],

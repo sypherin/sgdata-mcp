@@ -39,6 +39,8 @@
     "dev": "tsx src/mcp-server.ts",
     "cli": "tsx src/cli.ts",
     "test:smoke": "tsx test/smoke.ts",
+    "test": "npm run build && node test/retry-429.mjs && node test/dispatch-validate.mjs && node test/count-meta.mjs && node test/smoke-meta.mjs && node test/hdb-recent.mjs",
+    "test:all-tools": "npm run build && node test/test-all-tools.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
