@@ -62,7 +62,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/sypherin/sgdata-mcp"
+    "url": "git+https://github.com/sypherin/sgdata-mcp.git"
   },
   "homepage": "https://altronis.sg",
   "engines": {
